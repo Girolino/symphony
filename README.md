@@ -18,6 +18,14 @@ Symphony works best in codebases that have adopted
 [harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
 moving from managing coding agents to managing work that needs to get done.
 
+### Local Multi-Repo Operator Notes
+
+For the local Linear-backed, one-workflow-per-repo operating model used on this machine, see
+[docs/multi-repo-linear-workflows.md](docs/multi-repo-linear-workflows.md).
+
+For this fork's local remote and branch conventions, see
+[docs/fork-operations.md](docs/fork-operations.md).
+
 ### Option 1. Make your own
 
 Tell your favorite coding agent to build Symphony in a programming language of your choice:

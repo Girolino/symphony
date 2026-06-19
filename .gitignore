@@ -1,0 +1,19 @@
+# Editor and OS files.
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local environment and auth artifacts.
+.env
+.env.*
+.secrets
+.credentials
+.codex/original-user-prompt.txt
+
+# Root-level runtime output.
+log/
+logs/
+tmp/
