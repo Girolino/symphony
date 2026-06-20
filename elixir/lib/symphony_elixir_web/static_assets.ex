@@ -23,6 +23,18 @@ defmodule SymphonyElixirWeb.StaticAssets do
     "/vendor/phoenix_live_view/phoenix_live_view.js" => {"application/javascript", @phoenix_live_view_js}
   }
 
+  @asset_digests Map.new(@assets, fn {path, {_content_type, body}} ->
+                   {path, :crypto.hash(:sha256, body) |> Base.encode16(case: :lower) |> binary_part(0, 12)}
+                 end)
+
+  @spec path(String.t()) :: String.t()
+  def path(path) when is_binary(path) do
+    case Map.fetch(@asset_digests, path) do
+      {:ok, digest} -> "#{path}?v=#{digest}"
+      :error -> path
+    end
+  end
+
   @spec fetch(String.t()) :: {:ok, String.t(), binary()} | :error
   def fetch(path) when is_binary(path) do
     case Map.fetch(@assets, path) do

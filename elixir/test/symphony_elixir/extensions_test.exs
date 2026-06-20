@@ -524,17 +524,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     html = html_response(get(build_conn(), "/"), 200)
     assert html =~ "/dashboard.css"
+    assert html =~ "/dashboard.css?v="
     assert html =~ "/vendor/phoenix_html/phoenix_html.js"
     assert html =~ "/vendor/phoenix/phoenix.js"
     assert html =~ "/vendor/phoenix_live_view/phoenix_live_view.js"
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
-    dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
+    dashboard_css_conn = get(build_conn(), "/dashboard.css")
+    dashboard_css = response(dashboard_css_conn, 200)
     assert dashboard_css =~ ":root {"
     assert dashboard_css =~ ".status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert Plug.Conn.get_resp_header(dashboard_css_conn, "cache-control") == ["no-cache"]
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -567,7 +570,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    assert html =~ "Operator Cockpit"
+    assert html =~ "Runtime metrics"
+    assert html =~ "Queue focus"
+    assert html =~ "Session inspector"
+    assert html =~ "Guardrail ledger"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
@@ -580,6 +587,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Codex update"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
+    refute html =~ "Command strip"
+    refute html =~ "Next operator move"
+    refute html =~ "MT-HTTP is running"
     refute html =~ "Refresh now"
     refute html =~ "Transport"
     assert html =~ "status-badge-live"

@@ -25,7 +25,7 @@ defmodule SymphonyElixirWeb.StaticAssetController do
       {:ok, content_type, body} ->
         conn
         |> put_resp_content_type(content_type)
-        |> put_resp_header("cache-control", "public, max-age=31536000")
+        |> put_resp_header("cache-control", "no-cache")
         |> send_resp(200, body)
 
       :error ->
