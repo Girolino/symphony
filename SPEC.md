@@ -1387,6 +1387,9 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns a summary view of the current system state (running sessions, retry queue/delays,
     aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - Implementations SHOULD serve public reads from a last-known-good snapshot that does not require a
+    synchronous call through the orchestrator's mutation mailbox. Snapshot health SHOULD distinguish
+    freshness, orchestrator liveness, mailbox pressure, and an in-progress poll.
   - Suggested response shape:
 
     ```json
@@ -1429,7 +1432,15 @@ Minimum endpoints:
         "total_tokens": 7400,
         "seconds_running": 1834.2
       },
-      "rate_limits": null
+      "rate_limits": null,
+      "health": {
+        "status": "healthy",
+        "snapshot_age_ms": 12,
+        "stale_after_ms": 60000,
+        "orchestrator_alive": true,
+        "message_queue_len": 4,
+        "poll_busy": false
+      }
     }
     ```
 
