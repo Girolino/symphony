@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.LogFile
+  alias SymphonyElixir.MetricsLedger
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
@@ -145,6 +146,7 @@ defmodule SymphonyElixir.CLI do
 
   defp set_logs_root(logs_root) do
     Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(logs_root))
+    Application.put_env(:symphony_elixir, :metrics_ledger_file, MetricsLedger.default_ledger_file(logs_root))
     :ok
   end
 

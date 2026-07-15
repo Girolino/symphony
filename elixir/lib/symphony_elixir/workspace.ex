@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @hook_skip_exit_status 75
 
   @type worker_host :: String.t() | nil
 
@@ -164,7 +165,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
-          :ok | {:error, term()}
+          :ok | {:skip, term()} | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
@@ -333,6 +334,14 @@ defmodule SymphonyElixir.Workspace do
 
   defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
     :ok
+  end
+
+  defp handle_hook_command_result({output, @hook_skip_exit_status}, workspace, issue_context, "before_run") do
+    sanitized_output = sanitize_hook_output_for_log(output)
+
+    Logger.info("Workspace before_run hook requested skip #{issue_log_context(issue_context)} workspace=#{workspace} output=#{inspect(sanitized_output)}")
+
+    {:skip, {:workspace_hook_skip, "before_run", output}}
   end
 
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do

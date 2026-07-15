@@ -1076,6 +1076,54 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner skips codex when before_run hook requests skip" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-skip-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      codex_marker = Path.join(test_root, "codex-invoked")
+
+      File.mkdir_p!(template_repo)
+      File.mkdir_p!(workspace_root)
+      File.write!(Path.join(template_repo, "README.md"), "# skip test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      echo invoked > "#{codex_marker}"
+      exit 1
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_before_run: "echo guardrail-skip && exit 75",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        identifier: "S-SKIP",
+        title: "Skip test",
+        description: "Do not invoke codex",
+        state: "In Progress",
+        url: "https://example.org/issues/S-SKIP",
+        labels: ["backend"]
+      }
+
+      assert :ok = AgentRunner.run(issue)
+      refute File.exists?(codex_marker)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner forwards timestamped codex updates to recipient" do
     test_root =
       Path.join(

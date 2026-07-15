@@ -632,6 +632,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "before_run hook can intentionally skip an agent run" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hooks-skip-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: "echo guardrail-skip && exit 75"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-SKIP")
+
+      assert {:skip, {:workspace_hook_skip, "before_run", output}} =
+               Workspace.run_before_run_hook(workspace, "MT-HOOKS-SKIP")
+
+      assert output =~ "guardrail-skip"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace remove continues when before_remove hook fails" do
     test_root =
       Path.join(

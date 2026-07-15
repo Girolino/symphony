@@ -274,6 +274,103 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert completed_state.codex_totals.total_tokens == 16
   end
 
+  test "orchestrator persists codex totals across restarts" do
+    metrics_root =
+      Path.join(System.tmp_dir!(), "symphony-metrics-ledger-#{System.unique_integer([:positive])}")
+
+    ledger_file = MetricsLedger.default_ledger_file(metrics_root)
+    Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_file)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :metrics_ledger_file)
+      File.rm_rf(metrics_root)
+    end)
+
+    issue_id = "issue-persisted-totals"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-203",
+      title: "Persisted totals test",
+      description: "Track durable totals",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-203"
+    }
+
+    first_orchestrator_name = Module.concat(__MODULE__, :PersistedTotalsFirstOrchestrator)
+    {:ok, first_pid} = Orchestrator.start_link(name: first_orchestrator_name)
+
+    initial_state = :sys.get_state(first_pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(first_pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      first_pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         payload: %{
+           method: "turn/completed",
+           usage: %{"input_tokens" => 12, "output_tokens" => 4, "total_tokens" => 16}
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    send(first_pid, {:DOWN, process_ref, :process, self(), :normal})
+    Process.sleep(10)
+
+    first_state = :sys.get_state(first_pid)
+    assert first_state.codex_totals.input_tokens == 12
+    assert first_state.codex_totals.output_tokens == 4
+    assert first_state.codex_totals.total_tokens == 16
+    assert first_state.codex_totals.seconds_running >= 0
+    assert File.regular?(ledger_file)
+
+    if Process.alive?(first_pid) do
+      Process.exit(first_pid, :normal)
+    end
+
+    second_orchestrator_name = Module.concat(__MODULE__, :PersistedTotalsSecondOrchestrator)
+    {:ok, second_pid} = Orchestrator.start_link(name: second_orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(second_pid) do
+        Process.exit(second_pid, :normal)
+      end
+    end)
+
+    second_state = :sys.get_state(second_pid)
+    assert second_state.codex_totals.input_tokens == 12
+    assert second_state.codex_totals.output_tokens == 4
+    assert second_state.codex_totals.total_tokens == 16
+    assert second_state.codex_totals.seconds_running >= first_state.codex_totals.seconds_running
+  end
+
   test "orchestrator snapshot tracks codex token-count cumulative usage payloads" do
     issue_id = "issue-token-count-snapshot"
 

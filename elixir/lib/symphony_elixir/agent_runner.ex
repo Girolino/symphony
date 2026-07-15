@@ -34,8 +34,16 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          case Workspace.run_before_run_hook(workspace, issue, worker_host) do
+            :ok ->
+              run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+
+            {:skip, reason} ->
+              Logger.info("Skipping agent run for #{issue_context(issue)} after before_run hook request: #{inspect(reason)}")
+              :ok
+
+            {:error, reason} ->
+              {:error, reason}
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)

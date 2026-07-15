@@ -7,7 +7,16 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, OrchestratorSnapshotStore, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    MetricsLedger,
+    OrchestratorSnapshotStore,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -63,7 +72,7 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
-      codex_totals: @empty_codex_totals,
+      codex_totals: MetricsLedger.load_totals(@empty_codex_totals),
       codex_rate_limits: nil
     }
 
@@ -1577,16 +1586,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
 
-    codex_totals =
-      apply_token_delta(
-        state.codex_totals,
-        %{
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          seconds_running: runtime_seconds
-        }
-      )
+    token_delta = %{
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      seconds_running: runtime_seconds
+    }
+
+    MetricsLedger.append_delta(token_delta)
+    codex_totals = apply_token_delta(state.codex_totals, token_delta)
 
     %{state | codex_totals: codex_totals}
   end
@@ -1617,6 +1625,7 @@ defmodule SymphonyElixir.Orchestrator do
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
        )
        when is_integer(input) and is_integer(output) and is_integer(total) do
+    MetricsLedger.append_delta(token_delta)
     %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
   end
 
