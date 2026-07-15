@@ -23,6 +23,10 @@ moving from managing coding agents to managing work that needs to get done.
 For the local Linear-backed, one-workflow-per-repo operating model used on this machine, see
 [docs/multi-repo-linear-workflows.md](docs/multi-repo-linear-workflows.md).
 
+For the draft plan to support multiple workflow instances, workflow packs, UI prompt/config
+inspection, and pluggable agent runtimes, see
+[docs/multi-workflow-runtime-spec.md](docs/multi-workflow-runtime-spec.md).
+
 For this fork's local remote and branch conventions, see
 [docs/fork-operations.md](docs/fork-operations.md).
 

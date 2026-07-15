@@ -1,0 +1,1470 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Symphony Operator Cockpit Mockup</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@500;600&family=DM+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f6f1;
+        --sidebar: #e9ece4;
+        --surface: #ffffff;
+        --surface-subtle: #f3f5ef;
+        --surface-warm: #fbfaf4;
+        --surface-cool: #edf5f3;
+        --ink: #1f2723;
+        --muted: #68746f;
+        --line: rgba(31, 39, 35, 0.12);
+        --line-strong: rgba(31, 39, 35, 0.22);
+        --teal: #0b8c80;
+        --teal-dark: #075f59;
+        --teal-soft: #dff3ee;
+        --blue: #2769a8;
+        --blue-soft: #e5eff8;
+        --amber: #a46616;
+        --amber-soft: #fff1d7;
+        --red: #b43d30;
+        --red-soft: #fde7e4;
+        --violet: #6e5796;
+        --violet-soft: #eee8f6;
+        --green: #267246;
+        --green-soft: #e2f3e8;
+        --radius: 8px;
+        --shadow: 0 1px 2px rgba(31, 39, 35, 0.05), 0 12px 28px rgba(31, 39, 35, 0.07);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "DM Sans", sans-serif;
+        font-size: 16px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--teal);
+        outline-offset: 2px;
+      }
+
+      .app {
+        display: grid;
+        min-height: 100vh;
+        grid-template-columns: 220px minmax(0, 1fr);
+        isolation: isolate;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 0;
+        display: grid;
+        height: 100vh;
+        grid-template-rows: auto 1fr auto;
+        gap: 18px;
+        border-right: 1px solid var(--line);
+        background: var(--sidebar);
+        padding: 16px;
+      }
+
+      .brand {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 10px;
+        border-radius: var(--radius);
+      }
+
+      .brand-mark {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        flex: none;
+        place-items: center;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+        color: var(--teal-dark);
+        font-weight: 700;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-family: "Crimson Pro", serif;
+        font-size: 1.38rem;
+        font-weight: 600;
+        line-height: 1;
+      }
+
+      .brand p {
+        margin: 2px 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .mobile-topbar {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--sidebar);
+        padding: 12px 16px;
+      }
+
+      .nav {
+        display: grid;
+        align-content: start;
+        gap: 4px;
+      }
+
+      .nav-section {
+        margin: 14px 0 4px;
+        color: var(--muted);
+        font-size: 0.76rem;
+        font-weight: 700;
+      }
+
+      .nav-link {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        border-radius: var(--radius);
+        padding: 6px 8px;
+        color: #43504b;
+        font-size: 0.9rem;
+      }
+
+      .nav-link.active {
+        background: rgba(15, 139, 125, 0.12);
+        color: var(--teal-dark);
+      }
+
+      .nav-link:hover {
+        background: rgba(31, 39, 35, 0.05);
+        color: var(--ink);
+      }
+
+      .nav-link svg {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+
+      .sidebar-footer {
+        display: grid;
+        gap: 8px;
+        border-top: 1px solid var(--line);
+        padding-top: 14px;
+      }
+
+      .status-line {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .main {
+        min-width: 0;
+      }
+
+      .toolbar {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(246, 245, 241, 0.92);
+        padding: 12px 18px;
+      }
+
+      .title-block {
+        min-width: 0;
+      }
+
+      .title-block p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .title-block h2 {
+        margin: 2px 0 0;
+        font-family: "Crimson Pro", serif;
+        font-size: 1.74rem;
+        font-weight: 600;
+        text-wrap: balance;
+      }
+
+      .toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 32px;
+        align-items: center;
+        gap: 7px;
+        border: 1px solid transparent;
+        border-radius: var(--radius);
+        padding: 6px 10px;
+        font-size: 0.88rem;
+        font-weight: 700;
+      }
+
+      .button.primary {
+        border-color: var(--teal);
+        background: var(--teal);
+        color: #fff;
+      }
+
+      .button.secondary {
+        border-color: var(--line-strong);
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      .button.secondary:hover {
+        background: var(--surface-subtle);
+      }
+
+      .button svg {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+
+      .content {
+        display: grid;
+        gap: 14px;
+        padding: 16px 18px 30px;
+      }
+
+      .command-strip {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(420px, 0.65fr);
+        gap: 14px;
+        border: 1px solid rgba(15, 139, 125, 0.24);
+        border-radius: var(--radius);
+        background: linear-gradient(135deg, #ffffff 0%, var(--surface-cool) 100%);
+        padding: 14px;
+      }
+
+      .command-main {
+        min-width: 0;
+      }
+
+      .command-label {
+        margin: 0;
+        color: var(--teal-dark);
+        font-size: 0.78rem;
+        font-weight: 800;
+      }
+
+      .command-title {
+        margin: 5px 0 0;
+        overflow: hidden;
+        font-size: 1.05rem;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .command-copy {
+        margin: 5px 0 0;
+        max-width: 78ch;
+        color: var(--muted);
+        font-size: 0.9rem;
+        text-wrap: pretty;
+      }
+
+      .command-meta {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        align-content: stretch;
+        gap: 8px;
+      }
+
+      .command-stat {
+        min-width: 0;
+        border-left: 1px solid rgba(15, 139, 125, 0.18);
+        padding-left: 10px;
+      }
+
+      .command-stat dt {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.74rem;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .command-stat dd {
+        margin: 5px 0 0;
+        font-size: 0.9rem;
+        font-weight: 800;
+        line-height: 1.25;
+      }
+
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+
+      .kpi {
+        min-width: 0;
+        padding: 11px 12px;
+      }
+
+      .kpi + .kpi {
+        border-left: 1px solid var(--line);
+      }
+
+      .kpi-label {
+        margin: 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .kpi-value {
+        margin: 6px 0 0;
+        font-size: 1.18rem;
+        font-weight: 700;
+        line-height: 1;
+        font-variant-numeric: tabular-nums slashed-zero;
+      }
+
+      .kpi-detail {
+        margin: 5px 0 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.82rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .layout {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(0, 1.5fr) minmax(340px, 0.8fr);
+        gap: 14px;
+      }
+
+      .stack {
+        display: grid;
+        min-width: 0;
+        align-content: start;
+        gap: 14px;
+      }
+
+      .panel {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        box-shadow: none;
+      }
+
+      .panel.flush {
+        box-shadow: none;
+      }
+
+      .panel-header {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 14px;
+      }
+
+      .panel-title {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 700;
+      }
+
+      .panel-subtitle {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
+
+      .panel-body {
+        min-width: 0;
+        padding: 14px;
+      }
+
+      .rail {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(128px, 1fr));
+        gap: 8px;
+      }
+
+      .rail-step {
+        display: grid;
+        min-width: 0;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface-warm);
+        padding: 9px;
+      }
+
+      .rail-step.active {
+        border-color: rgba(15, 139, 125, 0.42);
+        background: var(--teal-soft);
+        box-shadow: inset 0 0 0 1px rgba(15, 139, 125, 0.12);
+      }
+
+      .rail-top {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .rail-name {
+        margin: 0;
+        overflow: hidden;
+        font-size: 0.86rem;
+        font-weight: 800;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .rail-count {
+        display: inline-flex;
+        min-width: 24px;
+        justify-content: center;
+        border-radius: 999px;
+        background: rgba(31, 39, 35, 0.08);
+        padding: 1px 6px;
+        font-size: 0.78rem;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .rail-list {
+        display: grid;
+        gap: 4px;
+      }
+
+      .rail-state {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .issue-list {
+        display: grid;
+        gap: 0;
+      }
+
+      .issue-row {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(220px, 1.24fr) 164px minmax(192px, 0.9fr) 78px minmax(126px, 0.55fr);
+        gap: 10px;
+        align-items: center;
+        border-top: 1px solid var(--line);
+        padding: 11px 14px;
+      }
+
+      .issue-row:first-child {
+        border-top: 0;
+      }
+
+      .issue-row.is-active {
+        background: linear-gradient(90deg, rgba(15, 139, 125, 0.09), rgba(255, 255, 255, 0));
+      }
+
+      .issue-row.is-watch {
+        background: linear-gradient(90deg, rgba(164, 102, 22, 0.1), rgba(255, 255, 255, 0));
+      }
+
+      .issue-main {
+        min-width: 0;
+      }
+
+      .issue-id {
+        color: var(--teal-dark);
+        font-size: 0.84rem;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .issue-title {
+        margin: 3px 0 0;
+        overflow: hidden;
+        font-size: 0.92rem;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .issue-meta {
+        margin: 3px 0 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.82rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .badge-row {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+
+      .badge {
+        display: inline-flex;
+        max-width: 100%;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 2px 7px;
+        background: var(--surface-subtle);
+        color: #39433f;
+        font-size: 0.78rem;
+        font-weight: 700;
+      }
+
+      .badge.clean {
+        border-color: rgba(38, 114, 70, 0.22);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .badge.warn {
+        border-color: rgba(164, 102, 22, 0.24);
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .badge.danger {
+        border-color: rgba(180, 61, 48, 0.22);
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .badge.info {
+        border-color: rgba(39, 105, 168, 0.22);
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+
+      .badge.violet {
+        border-color: rgba(110, 87, 150, 0.22);
+        background: var(--violet-soft);
+        color: var(--violet);
+      }
+
+      .mono {
+        font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-variant-numeric: tabular-nums slashed-zero;
+      }
+
+      .risk-text {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 0.84rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        border-bottom: 1px solid var(--line);
+        padding: 6px 8px 0;
+      }
+
+      .tab {
+        flex: none;
+        border: 0;
+        border-radius: var(--radius) var(--radius) 0 0;
+        background: transparent;
+        padding: 7px 10px;
+        color: var(--muted);
+        font-size: 0.84rem;
+        font-weight: 800;
+      }
+
+      .tab.active {
+        background: var(--surface-subtle);
+        color: var(--ink);
+      }
+
+      .workpad-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .field {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface-warm);
+        padding: 8px 9px;
+      }
+
+      .field-label {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.76rem;
+        font-weight: 800;
+      }
+
+      .field-value {
+        margin: 4px 0 0;
+        overflow: hidden;
+        font-size: 0.88rem;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .ledger {
+        display: grid;
+        gap: 8px;
+      }
+
+      .ledger-item {
+        display: grid;
+        grid-template-columns: 26px minmax(0, 1fr) auto;
+        gap: 9px;
+        align-items: start;
+        border-top: 1px solid var(--line);
+        padding-top: 9px;
+      }
+
+      .ledger-item:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .ledger-icon {
+        display: grid;
+        width: 22px;
+        height: 22px;
+        place-items: center;
+        border-radius: 999px;
+        background: var(--surface-subtle);
+        color: var(--teal-dark);
+      }
+
+      .ledger-icon svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .ledger-title {
+        margin: 0;
+        font-size: 0.88rem;
+        font-weight: 800;
+      }
+
+      .ledger-detail {
+        margin: 2px 0 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .linear-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .linear-cell {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface-warm);
+        padding: 11px;
+      }
+
+      .linear-cell h4 {
+        margin: 0;
+        font-size: 0.86rem;
+      }
+
+      .linear-cell p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .write-list {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .section-gap {
+        height: 14px;
+      }
+
+      .write-list li {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 8px;
+        color: #3c4742;
+        font-size: 0.86rem;
+      }
+
+      .write-list svg {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        margin-top: 2px;
+        color: var(--teal-dark);
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      .callout {
+        border: 1px solid rgba(164, 102, 22, 0.26);
+        border-radius: var(--radius);
+        background: var(--amber-soft);
+        padding: 12px;
+      }
+
+      .callout h4 {
+        margin: 0;
+        font-size: 0.9rem;
+      }
+
+      .callout p {
+        margin: 5px 0 0;
+        color: #6e4a15;
+        font-size: 0.84rem;
+      }
+
+      .code-block {
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #232924;
+        color: #eef5ef;
+        padding: 12px;
+        font-size: 0.78rem;
+        line-height: 1.55;
+      }
+
+      .hide {
+        display: none;
+      }
+
+      @media (max-width: 1180px) {
+        .command-strip {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .kpi-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .kpi:nth-child(4) {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+
+        .kpi:nth-child(n + 5) {
+          border-top: 1px solid var(--line);
+        }
+
+        .rail {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 900px) {
+        .app {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        .mobile-topbar {
+          display: flex;
+        }
+
+        .toolbar {
+          align-items: stretch;
+          flex-direction: column;
+          padding: 14px 16px;
+        }
+
+        .toolbar-actions {
+          justify-content: flex-start;
+        }
+
+        .content {
+          padding: 16px;
+        }
+
+        .command-title {
+          white-space: normal;
+        }
+
+        .command-meta {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .command-stat {
+          border-top: 1px solid rgba(15, 139, 125, 0.18);
+          border-left: 0;
+          padding-top: 8px;
+          padding-left: 0;
+        }
+
+        .issue-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .linear-grid,
+        .split {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 640px) {
+        body {
+          font-size: 16px;
+        }
+
+        .kpi-grid,
+        .rail,
+        .field-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .kpi + .kpi,
+        .kpi:nth-child(4),
+        .kpi:nth-child(n + 5) {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+
+        .button {
+          min-height: 40px;
+        }
+
+        .title-block h2 {
+          font-size: 1.5rem;
+        }
+
+        .panel-header {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .issue-title,
+        .issue-meta,
+        .risk-text {
+          white-space: normal;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="/" aria-label="Homepage">
+          <div class="brand-mark">S</div>
+          <div>
+            <h1>Symphony</h1>
+            <p>Alpine Reach queue</p>
+          </div>
+        </a>
+
+        <nav class="nav">
+          <p class="nav-section">Cockpit</p>
+          <a class="nav-link active" href="#overview"><i data-lucide="activity"></i>Overview</a>
+          <a class="nav-link" href="#queue"><i data-lucide="list-checks"></i>Queue</a>
+          <a class="nav-link" href="#workpad"><i data-lucide="file-text"></i>Workpad</a>
+          <a class="nav-link" href="#guardrails"><i data-lucide="shield-check"></i>Guardrails</a>
+          <p class="nav-section">Surfaces</p>
+          <a class="nav-link" href="#linear"><i data-lucide="workflow"></i>Linear</a>
+          <a class="nav-link" href="#release"><i data-lucide="rocket"></i>Release</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="status-line">
+            <span>Daemon</span>
+            <span class="badge clean">Live</span>
+          </div>
+          <div class="status-line">
+            <span>Port</span>
+            <span class="mono">4765</span>
+          </div>
+          <div class="status-line">
+            <span>Project</span>
+            <span>ALP</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main" id="overview">
+        <div class="mobile-topbar">
+          <a class="brand" href="/" aria-label="Homepage">
+            <div class="brand-mark">S</div>
+            <div>
+              <h1>Symphony</h1>
+              <p>Alpine Reach queue</p>
+            </div>
+          </a>
+          <button class="button secondary" type="button" aria-label="Open navigation">
+            <i data-lucide="menu"></i>
+          </button>
+        </div>
+
+        <header class="toolbar">
+          <div class="title-block">
+            <p>Live runtime + Linear durable state</p>
+            <h2>Operator Cockpit</h2>
+          </div>
+          <div class="toolbar-actions">
+            <button class="button secondary" type="button"><i data-lucide="refresh-cw"></i>Refresh</button>
+            <button class="button secondary" type="button"><i data-lucide="external-link"></i>Open Linear</button>
+            <button class="button primary" type="button"><i data-lucide="radar"></i>Run Guard</button>
+          </div>
+        </header>
+
+        <section class="content">
+          <section class="command-strip" aria-label="Current command">
+            <div class="command-main">
+              <p class="command-label">Current command</p>
+              <h3 class="command-title">ALP-302 is in Post-Merge Dev QA after PR #309 merged.</h3>
+              <p class="command-copy">
+                Keep the lane active until dev QA confirms the user-visible chat switching path or links the residual blank-frame fix to ALP-303.
+              </p>
+            </div>
+            <dl class="command-meta">
+              <div class="command-stat">
+                <dt>Next safe state</dt>
+                <dd>Done or linked follow-up</dd>
+              </div>
+              <div class="command-stat">
+                <dt>Guard risk</dt>
+                <dd>ALP-303 stamp mismatch</dd>
+              </div>
+              <div class="command-stat">
+                <dt>Proof needed</dt>
+                <dd>Dev screenshot pass</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="kpi-grid" aria-label="Runtime metrics">
+            <article class="kpi">
+              <p class="kpi-label">Running</p>
+              <p class="kpi-value">1</p>
+              <p class="kpi-detail">ALP-302 active</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Retrying</p>
+              <p class="kpi-value">0</p>
+              <p class="kpi-detail">No backoff queue</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Blocked</p>
+              <p class="kpi-value">3</p>
+              <p class="kpi-detail">No guard actions</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Linear sync</p>
+              <p class="kpi-value">Clean</p>
+              <p class="kpi-detail">0 missing states</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">States</p>
+              <p class="kpi-value">26</p>
+              <p class="kpi-detail">32 labels</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Token burn</p>
+              <p class="kpi-value">4.37B</p>
+              <p class="kpi-detail">All sessions</p>
+            </article>
+          </section>
+
+          <div class="layout">
+            <div class="stack">
+              <section class="panel flush">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Execution rail</h3>
+                    <p class="panel-subtitle">Grouped by operator decision points.</p>
+                  </div>
+                  <span class="badge info">Post-Merge Dev QA active</span>
+                </div>
+                <div class="panel-body">
+                  <div class="rail">
+                    <article class="rail-step">
+                      <div class="rail-top">
+                        <p class="rail-name">Intake</p>
+                        <span class="rail-count">1</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">Todo</span>
+                        <span class="rail-state">Triage</span>
+                        <span class="rail-state">Routed</span>
+                      </div>
+                    </article>
+                    <article class="rail-step">
+                      <div class="rail-top">
+                        <p class="rail-name">Planning gate</p>
+                        <span class="rail-count">1</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">Ready for Orchestration</span>
+                        <span class="rail-state">Claimed</span>
+                        <span class="rail-state">Planning</span>
+                      </div>
+                    </article>
+                    <article class="rail-step">
+                      <div class="rail-top">
+                        <p class="rail-name">Build</p>
+                        <span class="rail-count">0</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">Setup</span>
+                        <span class="rail-state">Implementing</span>
+                        <span class="rail-state">Verifying / Testing</span>
+                      </div>
+                    </article>
+                    <article class="rail-step">
+                      <div class="rail-top">
+                        <p class="rail-name">Review</p>
+                        <span class="rail-count">0</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">PR Open</span>
+                        <span class="rail-state">Agent Review</span>
+                        <span class="rail-state">Review Changes Requested</span>
+                      </div>
+                    </article>
+                    <article class="rail-step active">
+                      <div class="rail-top">
+                        <p class="rail-name">Merge + QA</p>
+                        <span class="rail-count">1</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">Merge Ready</span>
+                        <span class="rail-state">Merging</span>
+                        <span class="rail-state">Post-Merge Dev QA</span>
+                      </div>
+                    </article>
+                    <article class="rail-step">
+                      <div class="rail-top">
+                        <p class="rail-name">Release</p>
+                        <span class="rail-count">0</span>
+                      </div>
+                      <div class="rail-list">
+                        <span class="rail-state">Release Candidate</span>
+                        <span class="rail-state">Production Smoke</span>
+                        <span class="rail-state">Done</span>
+                      </div>
+                    </article>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel" id="queue">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Queue focus</h3>
+                    <p class="panel-subtitle">Live sample from Linear and the daemon API.</p>
+                  </div>
+                  <span class="badge clean">5 issues sampled</span>
+                </div>
+                <div class="issue-list">
+                  <article class="issue-row is-active">
+                    <div class="issue-main">
+                      <span class="issue-id">ALP-302</span>
+                      <p class="issue-title">Smooth Content Canva v2 chat switching without remount flashes</p>
+                      <p class="issue-meta">PR #309 merged at 2026-06-19T15:20:24Z</p>
+                    </div>
+                    <span class="badge info">Post-Merge Dev QA</span>
+                    <div class="badge-row">
+                      <span class="badge">User reported</span>
+                      <span class="badge">Needs dev QA</span>
+                    </div>
+                    <span class="mono">2 / 5</span>
+                    <p class="risk-text">Follow-up ALP-303 created</p>
+                  </article>
+                  <article class="issue-row is-watch">
+                    <div class="issue-main">
+                      <span class="issue-id">ALP-303</span>
+                      <p class="issue-title">Fix Content Canva v2 blank workspace frame during chat switching</p>
+                      <p class="issue-meta">Generated from ALP-302 dev-QA evidence</p>
+                    </div>
+                    <span class="badge clean">Ready for Orchestration</span>
+                    <div class="badge-row">
+                      <span class="badge">Visual QA</span>
+                      <span class="badge">User reported</span>
+                    </div>
+                    <span class="mono">0 / 5</span>
+                    <p class="risk-text">Workspace stamp references ALP-302</p>
+                  </article>
+                  <article class="issue-row">
+                    <div class="issue-main">
+                      <span class="issue-id">ALP-290</span>
+                      <p class="issue-title">QA signal council provider preflight still hits Responses 401</p>
+                      <p class="issue-meta">Spawned agent provider auth capability</p>
+                    </div>
+                    <span class="badge danger">Blocked</span>
+                    <div class="badge-row">
+                      <span class="badge danger">Blocked: external wait</span>
+                      <span class="badge">Provider blocker</span>
+                    </div>
+                    <span class="mono">0 / 5</span>
+                    <p class="risk-text">External auth wait</p>
+                  </article>
+                  <article class="issue-row">
+                    <div class="issue-main">
+                      <span class="issue-id">ALP-271</span>
+                      <p class="issue-title">Blank board action silently fails with project-session FORBIDDEN</p>
+                      <p class="issue-meta">Release readiness blocker lineage</p>
+                    </div>
+                    <span class="badge danger">Blocked</span>
+                    <div class="badge-row">
+                      <span class="badge danger">Blocked: needs fix PR</span>
+                      <span class="badge">Visual QA</span>
+                    </div>
+                    <span class="mono">1 / 5</span>
+                    <p class="risk-text">Requires focused fix</p>
+                  </article>
+                  <article class="issue-row">
+                    <div class="issue-main">
+                      <span class="issue-id">ALP-247</span>
+                      <p class="issue-title">Remove GoHighLevel integration support</p>
+                      <p class="issue-meta">Production Convex deploy capability wait</p>
+                    </div>
+                    <span class="badge danger">Blocked</span>
+                    <div class="badge-row">
+                      <span class="badge danger">Blocked: external wait</span>
+                    </div>
+                    <span class="mono">2 / 5</span>
+                    <p class="risk-text">External deployment capability</p>
+                  </article>
+                </div>
+              </section>
+
+              <section class="panel" id="linear">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Linear surfaces</h3>
+                    <p class="panel-subtitle">Managed inventory and write classes.</p>
+                  </div>
+                  <span class="badge clean">Dry-run clean</span>
+                </div>
+                <div class="panel-body">
+                  <div class="linear-grid">
+                    <div class="linear-cell">
+                      <h4>Workflow states</h4>
+                      <p>26 current states, 0 missing from sync.</p>
+                    </div>
+                    <div class="linear-cell">
+                      <h4>Labels</h4>
+                      <p>32 current labels, including blocked triage and review loop labels.</p>
+                    </div>
+                    <div class="linear-cell">
+                      <h4>Views</h4>
+                      <p>17 shared views defined for active work, blocked work, QA, and release risk.</p>
+                    </div>
+                  </div>
+                  <div class="section-gap" aria-hidden="true"></div>
+                  <ul class="write-list" role="list">
+                    <li><i data-lucide="git-branch"></i><span>State transitions through `issueUpdate` after resolving the target state id.</span></li>
+                    <li><i data-lucide="message-square"></i><span>One durable `## Symphony Workpad` comment through create/update comment mutations.</span></li>
+                    <li><i data-lucide="tag"></i><span>Label replacement for blocked triage, review exhaustion, and guardrail interventions.</span></li>
+                    <li><i data-lucide="copy-plus"></i><span>Dispatchable blocked-triage issues when original blocked work needs an audit task.</span></li>
+                    <li><i data-lucide="layout-list"></i><span>Shared Linear custom views for queue slicing and operator scans.</span></li>
+                  </ul>
+                </div>
+              </section>
+            </div>
+
+            <aside class="stack">
+              <section class="panel" id="workpad">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Workpad inspector</h3>
+                    <p class="panel-subtitle">Parsed from `ALP-302`.</p>
+                  </div>
+                  <span class="badge info">Current</span>
+                </div>
+                <div class="tabs" role="tablist">
+                  <button class="tab active" type="button" data-tab="stamp">Stamp</button>
+                  <button class="tab" type="button" data-tab="audit">Audit</button>
+                  <button class="tab" type="button" data-tab="validation">Validation</button>
+                </div>
+                <div class="panel-body">
+                  <div class="workpad-grid tab-panel" data-panel="stamp">
+                    <div class="field-grid">
+                      <div class="field">
+                        <p class="field-label">State</p>
+                        <p class="field-value">Post-Merge Dev QA</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Branch</p>
+                        <p class="field-value">develop</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">PR</p>
+                        <p class="field-value">github.com/Girolino/dr-thomas/pull/309</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Review round</p>
+                        <p class="field-value">2 / 5</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Merged SHA</p>
+                        <p class="field-value mono">0148fd6e</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Dev QA</p>
+                        <p class="field-value">Required</p>
+                      </div>
+                    </div>
+                    <div class="callout">
+                      <h4>Follow-up generated</h4>
+                      <p>ALP-303 is ready for orchestration after ALP-302 dev QA found the remaining blank-frame path.</p>
+                    </div>
+                  </div>
+
+                  <div class="workpad-grid tab-panel hide" data-panel="audit">
+                    <div class="field-grid">
+                      <div class="field">
+                        <p class="field-label">Lane</p>
+                        <p class="field-value">Implementation</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Triage class</p>
+                        <p class="field-value">Bug / failure</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Decision</p>
+                        <p class="field-value">Build complete now</p>
+                      </div>
+                      <div class="field">
+                        <p class="field-label">Audit round</p>
+                        <p class="field-value">0 / 2</p>
+                      </div>
+                    </div>
+                    <pre class="code-block">Route: Post-Merge Dev QA
+Owner: Post-Merge Dev QA Agent
+Next state: remain active until ALP-303 is handled or linked.</pre>
+                  </div>
+
+                  <div class="workpad-grid tab-panel hide" data-panel="validation">
+                    <div class="ledger">
+                      <div class="ledger-item">
+                        <span class="ledger-icon"><i data-lucide="check"></i></span>
+                        <div>
+                          <p class="ledger-title">Local checks passed</p>
+                          <p class="ledger-detail">Command evidence recorded before PR Open.</p>
+                        </div>
+                        <span class="badge clean">Pass</span>
+                      </div>
+                      <div class="ledger-item">
+                        <span class="ledger-icon"><i data-lucide="monitor-check"></i></span>
+                        <div>
+                          <p class="ledger-title">Dev QA found residual UI bug</p>
+                          <p class="ledger-detail">Follow-up ALP-303 carries screenshot-backed reproduction.</p>
+                        </div>
+                        <span class="badge warn">Follow-up</span>
+                      </div>
+                      <div class="ledger-item">
+                        <span class="ledger-icon"><i data-lucide="git-merge"></i></span>
+                        <div>
+                          <p class="ledger-title">PR #309 merged</p>
+                          <p class="ledger-detail">Merged SHA 0148fd6e75f294619af14595c40294b89801c65d.</p>
+                        </div>
+                        <span class="badge clean">Merged</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel" id="guardrails">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Guardrail ledger</h3>
+                    <p class="panel-subtitle">Transition quality checks.</p>
+                  </div>
+                  <span class="badge clean">0 actions</span>
+                </div>
+                <div class="panel-body">
+                  <div class="ledger">
+                    <div class="ledger-item">
+                      <span class="ledger-icon"><i data-lucide="shield-check"></i></span>
+                      <div>
+                        <p class="ledger-title">Blocked audit clean</p>
+                        <p class="ledger-detail">Scanned 3 blocked issues, no new actions proposed.</p>
+                      </div>
+                      <span class="badge clean">Clean</span>
+                    </div>
+                    <div class="ledger-item">
+                      <span class="ledger-icon"><i data-lucide="file-warning"></i></span>
+                      <div>
+                        <p class="ledger-title">ALP-303 stamp mismatch</p>
+                        <p class="ledger-detail">Issue identifier differs from workspace path in the workpad sample.</p>
+                      </div>
+                      <span class="badge warn">Watch</span>
+                    </div>
+                    <div class="ledger-item">
+                      <span class="ledger-icon"><i data-lucide="repeat-2"></i></span>
+                      <div>
+                        <p class="ledger-title">Review loop budget</p>
+                        <p class="ledger-detail">Max 5 rounds; ALP-302 is at round 2.</p>
+                      </div>
+                      <span class="badge info">2 / 5</span>
+                    </div>
+                    <div class="ledger-item">
+                      <span class="ledger-icon"><i data-lucide="clipboard-check"></i></span>
+                      <div>
+                        <p class="ledger-title">Planning gate enforced</p>
+                        <p class="ledger-detail">Setup, build, verify, test, and PR states require a valid audit block.</p>
+                      </div>
+                      <span class="badge clean">Soft</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel" id="release">
+                <div class="panel-header">
+                  <div>
+                    <h3 class="panel-title">Release posture</h3>
+                    <p class="panel-subtitle">Develop to main readiness lens.</p>
+                  </div>
+                  <span class="badge warn">Pending packet</span>
+                </div>
+                <div class="panel-body">
+                  <div class="split">
+                    <div class="field">
+                      <p class="field-label">Dev QA lane</p>
+                      <p class="field-value">ALP-302 active</p>
+                    </div>
+                    <div class="field">
+                      <p class="field-label">Production smoke</p>
+                      <p class="field-value">No current run</p>
+                    </div>
+                    <div class="field">
+                      <p class="field-label">Release blockers</p>
+                      <p class="field-value">Blocked issues present</p>
+                    </div>
+                    <div class="field">
+                      <p class="field-label">Main merge gate</p>
+                      <p class="field-value">Readiness block required</p>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      window.lucide?.createIcons();
+
+      const tabs = document.querySelectorAll(".tab");
+      const panels = document.querySelectorAll(".tab-panel");
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const target = tab.dataset.tab;
+          tabs.forEach((candidate) => candidate.classList.toggle("active", candidate === tab));
+          panels.forEach((panel) => panel.classList.toggle("hide", panel.dataset.panel !== target));
+        });
+      });
+    </script>
+  </body>
+</html>
