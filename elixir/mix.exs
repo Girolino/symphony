@@ -17,6 +17,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Linear.Client,
           SymphonyElixir.SpecsCheck,
           SymphonyElixir.Orchestrator,
+          SymphonyElixir.OrchestratorSnapshotStore,
           SymphonyElixir.Orchestrator.State,
           SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,
