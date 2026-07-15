@@ -1039,8 +1039,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -1109,8 +1108,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -1825,6 +1823,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp wait_for_state(pid, predicate, timeout_ms) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state(pid, predicate, deadline_ms)
+  end
+
+  defp do_wait_for_state(pid, predicate, deadline_ms) do
+    state = :sys.get_state(pid)
+
+    cond do
+      predicate.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        flunk("timed out waiting for orchestrator state: #{inspect(state)}")
+
+      true ->
+        Process.sleep(5)
+        do_wait_for_state(pid, predicate, deadline_ms)
+    end
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
