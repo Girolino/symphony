@@ -8,6 +8,10 @@ LOGS_ROOT="${SYMPHONY_UPKEEP_LOGS_ROOT:-$HOME/.cache/symphony-upkeep/logs}"
 LABEL="com.symphony.upkeep-heartbeat"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
+case "$REPO_ROOT$LOGS_ROOT" in
+  *"|"*) echo "paths containing '|' would corrupt the sed template render" >&2; exit 1 ;;
+esac
+
 mkdir -p "$LOGS_ROOT" "$HOME/Library/LaunchAgents"
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOGS_ROOT__|$LOGS_ROOT|g" \
   "$SCRIPT_DIR/launchd/$LABEL.plist.template" > "$PLIST"

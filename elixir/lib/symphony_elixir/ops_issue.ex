@@ -141,11 +141,13 @@ defmodule SymphonyElixir.OpsIssue do
   # New issues must land in a dispatchable (unstarted) state: teams default to
   # Backlog, which lanes deliberately exclude from active_states.
   defp dispatchable_state_id(team) do
-    team
-    |> get_in(["states", "nodes"])
-    |> List.wrap()
-    |> Enum.find(&(&1["type"] == "unstarted"))
-    |> case do
+    states = team |> get_in(["states", "nodes"]) |> List.wrap()
+
+    preferred =
+      Enum.find(states, &(&1["type"] == "unstarted" and &1["name"] == "Todo")) ||
+        Enum.find(states, &(&1["type"] == "unstarted"))
+
+    case preferred do
       %{"id" => id} -> id
       nil -> nil
     end
