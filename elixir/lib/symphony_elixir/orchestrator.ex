@@ -279,6 +279,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_running_issues()
       |> expire_stale_blocked()
       |> reconcile_blocked_issues()
+      |> reconcile_parked_issues()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -758,6 +759,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
     blocked_entry = %{
       issue_id: issue_id,
+      failures: get_in(state.retry_attempts, [issue_id, :failures]) || 0,
       identifier: Map.get(running_entry, :identifier, issue_id),
       issue: Map.get(running_entry, :issue),
       worker_host: Map.get(running_entry, :worker_host),
@@ -1040,14 +1042,22 @@ defmodule SymphonyElixir.Orchestrator do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
 
-    if breaker_tripped?(next_attempt) do
-      park_issue(state, issue_id, next_attempt, previous_retry, metadata)
+    # Capacity waits and tracker-poll errors are not failures of the issue;
+    # only failure retries advance the breaker (CR-002). Carried counts from a
+    # block/expire cycle survive via metadata (CR-004).
+    failure? = Map.get(metadata, :failure?, true)
+    carried = Map.get(metadata, :carry_failures, 0)
+    base_failures = max(Map.get(previous_retry, :failures, 0), carried)
+    failures = if failure?, do: base_failures + 1, else: base_failures
+
+    if failure? and breaker_tripped?(failures) do
+      park_issue(state, issue_id, failures, previous_retry, metadata)
     else
-      do_schedule_issue_retry(state, issue_id, next_attempt, previous_retry, metadata)
+      do_schedule_issue_retry(state, issue_id, next_attempt, failures, previous_retry, metadata)
     end
   end
 
-  defp do_schedule_issue_retry(%State{} = state, issue_id, next_attempt, previous_retry, metadata) do
+  defp do_schedule_issue_retry(%State{} = state, issue_id, next_attempt, failures, previous_retry, metadata) do
     delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
@@ -1072,6 +1082,7 @@ defmodule SymphonyElixir.Orchestrator do
       | retry_attempts:
           Map.put(state.retry_attempts, issue_id, %{
             attempt: next_attempt,
+            failures: failures,
             timer_ref: timer_ref,
             retry_token: retry_token,
             due_at_ms: due_at_ms,
@@ -1086,14 +1097,14 @@ defmodule SymphonyElixir.Orchestrator do
   # Circuit breaker (CONSTITUTION.md C3): consecutive failures park the ISSUE,
   # never the system — other issues keep dispatching, and the park always
   # terminates in a deduplicated ops issue (C4).
-  defp breaker_tripped?(next_attempt) do
+  defp breaker_tripped?(failures) do
     case Config.settings!().agent.max_consecutive_failures do
-      max when is_integer(max) and max > 0 -> next_attempt > max
+      max when is_integer(max) and max > 0 -> failures > max
       _ -> false
     end
   end
 
-  defp park_issue(%State{} = state, issue_id, attempt, previous_retry, metadata) do
+  defp park_issue(%State{} = state, issue_id, failures, previous_retry, metadata) do
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata) || "unknown error"
     old_timer = Map.get(previous_retry, :timer_ref)
@@ -1102,9 +1113,9 @@ defmodule SymphonyElixir.Orchestrator do
       Process.cancel_timer(old_timer)
     end
 
-    Logger.error("Breaker parked issue_id=#{issue_id} issue_identifier=#{identifier} after #{attempt - 1} consecutive failures; filing ops issue")
+    Logger.error("Breaker parked issue_id=#{issue_id} issue_identifier=#{identifier} after #{failures} consecutive failures; filing ops issue")
 
-    file_parked_ops_issue(identifier, attempt - 1, error)
+    file_parked_ops_issue(identifier, failures, error)
 
     %{
       state
@@ -1115,7 +1126,7 @@ defmodule SymphonyElixir.Orchestrator do
             issue_id: issue_id,
             identifier: identifier,
             error: error,
-            failures: attempt - 1,
+            failures: failures,
             parked_at: DateTime.utc_now()
           })
     }
@@ -1129,12 +1140,73 @@ defmodule SymphonyElixir.Orchestrator do
         "The lane circuit breaker parked #{identifier} after #{failures} consecutive failed runs. " <>
           "Last error: #{error}. Investigate the failure class; the issue stays parked until the daemon restarts or this is resolved."
 
-      case SymphonyElixir.OpsIssue.file(title, body, []) do
-        {:created, issue} -> Logger.warning("Breaker ops issue created: #{issue["identifier"]}")
-        {:existing, issue} -> Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
-        {:error, reason} -> Logger.error("Breaker ops issue filing FAILED (C4 violation risk): #{inspect(reason)}")
-      end
+      file_parked_ops_issue_with_retry(title, body)
     end)
+  end
+
+  defp file_parked_ops_issue_with_retry(title, body) do
+    case SymphonyElixir.OpsIssue.file(title, body, []) do
+      {:created, issue} ->
+        Logger.warning("Breaker ops issue created: #{issue["identifier"]}")
+
+      {:existing, issue} ->
+        Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
+
+      {:error, first_reason} ->
+        Process.sleep(30_000)
+        file_parked_ops_issue_final(title, body, first_reason)
+    end
+  end
+
+  defp file_parked_ops_issue_final(title, body, first_reason) do
+    case SymphonyElixir.OpsIssue.file(title, body, []) do
+      {:created, issue} ->
+        Logger.warning("Breaker ops issue created on retry: #{issue["identifier"]}")
+
+      {:existing, issue} ->
+        Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
+
+      {:error, reason} ->
+        # Accepted residual: no durable pending record; the park stays visible
+        # in logs and the issue re-parks after restart.
+        Logger.error("Breaker ops issue filing FAILED twice (C4 risk): first=#{inspect(first_reason)} then=#{inspect(reason)}")
+    end
+  end
+
+  # Parked issues are reconciled every poll: when the tracker says the issue
+  # reached a terminal state (a human or another lane resolved it), the park
+  # and claim are released. Parks are otherwise in-memory by design — a daemon
+  # restart re-arms the breaker rather than persisting stale state (CR-003).
+  defp reconcile_parked_issues(%State{parked: parked} = state) when map_size(parked) == 0, do: state
+
+  defp reconcile_parked_issues(%State{} = state) do
+    case Tracker.fetch_issue_states_by_ids(Map.keys(state.parked)) do
+      {:ok, issues} ->
+        terminal_states = terminal_state_set()
+
+        Enum.reduce(issues, state, fn
+          %Issue{id: id, state: issue_state}, acc -> maybe_unpark(acc, id, issue_state, terminal_states)
+          _issue, acc -> acc
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Parked reconciliation failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp maybe_unpark(%State{} = state, id, issue_state, terminal_states) do
+    if is_binary(issue_state) and MapSet.member?(terminal_states, normalize_issue_state(issue_state)) do
+      Logger.info("Unparking terminal issue_id=#{id}")
+
+      %{
+        state
+        | parked: Map.delete(state.parked, id),
+          claimed: MapSet.delete(state.claimed, id)
+      }
+    else
+      state
+    end
   end
 
   # Liveness default action for blocked issues (CONSTITUTION.md; REVIEW.md
@@ -1162,6 +1234,7 @@ defmodule SymphonyElixir.Orchestrator do
           schedule_issue_retry(acc, issue_id, nil, %{
             identifier: entry.identifier,
             error: "liveness: blocked longer than #{max_age}ms",
+            carry_failures: Map.get(entry, :failures, 0),
             worker_host: Map.get(entry, :worker_host),
             workspace_path: Map.get(entry, :workspace_path)
           })
@@ -1204,7 +1277,7 @@ defmodule SymphonyElixir.Orchestrator do
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}", failure?: false})
          )}
     end
   end
@@ -1284,7 +1357,8 @@ defmodule SymphonyElixir.Orchestrator do
          attempt + 1,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: "no available orchestrator slots",
+           failure?: false
          })
        )}
     end

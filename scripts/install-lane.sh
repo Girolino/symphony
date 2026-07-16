@@ -9,7 +9,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOGS_ROOT="${SYMPHONY_LANE_LOGS_ROOT:-$HOME/.cache/symphony-upkeep/logs}"
 
 case "$REPO_ROOT$LOGS_ROOT" in
-  *"|"*) echo "paths containing '|' would corrupt the sed template render" >&2; exit 1 ;;
+  *"|"* | *"&"* | *"\\"* | *"<"* | *">"*)
+    echo "paths containing | & \\ < > would corrupt the sed/XML render" >&2
+    exit 1
+    ;;
 esac
 
 mkdir -p "$LOGS_ROOT" "$HOME/Library/LaunchAgents"

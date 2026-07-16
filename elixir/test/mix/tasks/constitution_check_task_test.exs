@@ -87,4 +87,29 @@ defmodule Mix.Tasks.Constitution.CheckTest do
     assert Check.dirty_protected_paths("/anywhere", fn _cmd, _args, _opts -> {" M CONSTITUTION.md\n", 0} end) ==
              ["CONSTITUTION.md"]
   end
+
+  test "CR-001: committed protected-file changes are detected against origin/main" do
+    diff_cmd = fn
+      "git", ["-C", _root, "rev-parse", "--verify", "origin/main"], _opts -> {"abc123\n", 0}
+      "git", ["-C", _root, "diff", "--name-only", "origin/main", "HEAD", "--" | _], _opts -> {"CONSTITUTION.md\n", 0}
+    end
+
+    assert Check.committed_protected_changes("/anywhere", diff_cmd) == ["CONSTITUTION.md"]
+
+    no_origin = fn "git", ["-C", _root, "rev-parse" | _], _opts -> {"fatal", 128} end
+    assert Check.committed_protected_changes("/anywhere", no_origin) == []
+
+    diff_fails = fn
+      "git", ["-C", _root, "rev-parse" | _], _opts -> {"abc\n", 0}
+      "git", ["-C", _root, "diff" | _], _opts -> {"boom", 128}
+    end
+
+    assert_raise Mix.Error, ~r/git diff failed/, fn ->
+      Check.committed_protected_changes("/anywhere", diff_fails)
+    end
+  end
+
+  test "the checker protects itself" do
+    assert "elixir/lib/mix/tasks/constitution.check.ex" in Check.protected_paths()
+  end
 end

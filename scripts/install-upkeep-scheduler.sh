@@ -9,7 +9,10 @@ LABEL="com.symphony.upkeep-heartbeat"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 case "$REPO_ROOT$LOGS_ROOT" in
-  *"|"*) echo "paths containing '|' would corrupt the sed template render" >&2; exit 1 ;;
+  *"|"* | *"&"* | *"\\"* | *"<"* | *">"*)
+    echo "paths containing | & \\ < > would corrupt the sed/XML render" >&2
+    exit 1
+    ;;
 esac
 
 mkdir -p "$LOGS_ROOT" "$HOME/Library/LaunchAgents"

@@ -17,7 +17,8 @@ defmodule Mix.Tasks.Constitution.Check do
   @protected_paths [
     "CONSTITUTION.md",
     ".githooks",
-    "scripts/promote.sh"
+    "scripts/promote.sh",
+    "elixir/lib/mix/tasks/constitution.check.ex"
   ]
 
   @impl Mix.Task
@@ -39,7 +40,11 @@ defmodule Mix.Tasks.Constitution.Check do
     end
 
     if agent_lane?() do
-      case dirty_protected_paths(repo_root, &System.cmd/3) do
+      touched =
+        dirty_protected_paths(repo_root, &System.cmd/3) ++
+          committed_protected_changes(repo_root, &System.cmd/3)
+
+      case Enum.uniq(touched) do
         [] ->
           Mix.shell().info("constitution.check: protected invariants untouched (agent lane)")
 
@@ -59,6 +64,31 @@ defmodule Mix.Tasks.Constitution.Check do
 
   defp agent_lane?, do: System.get_env("SYMPHONY_AGENT_LANE") == "1"
 
+  # A worktree-only check would let an agent COMMIT the weakened file and pass
+  # (review round CR-001): committed protected-path changes relative to the
+  # published origin/main are equally forbidden in agent lanes.
+  @doc false
+  @type git_cmd :: (String.t(), [String.t()], keyword() -> {String.t(), non_neg_integer()})
+
+  @spec committed_protected_changes(String.t(), git_cmd()) :: [String.t()]
+  def committed_protected_changes(repo_root, cmd) do
+    case cmd.("git", ["-C", repo_root, "rev-parse", "--verify", "origin/main"], stderr_to_stdout: true) do
+      {_out, 0} ->
+        case cmd.(
+               "git",
+               ["-C", repo_root, "diff", "--name-only", "origin/main", "HEAD", "--"] ++ @protected_paths,
+               stderr_to_stdout: true
+             ) do
+          {out, 0} -> String.split(out, "\n", trim: true)
+          {out, _nonzero} -> Mix.raise("constitution.check: git diff failed: #{out}")
+        end
+
+      _no_origin ->
+        # Lanes always have origin; roots without it (fixtures) have nothing published to diff.
+        []
+    end
+  end
+
   defp tracked?(repo_root, path) do
     case System.cmd("git", ["-C", repo_root, "ls-files", "--error-unmatch", path], stderr_to_stdout: true) do
       {_out, 0} -> true
@@ -67,8 +97,7 @@ defmodule Mix.Tasks.Constitution.Check do
   end
 
   @doc false
-  @spec dirty_protected_paths(String.t(), (String.t(), [String.t()], keyword() -> {String.t(), non_neg_integer()})) ::
-          [String.t()]
+  @spec dirty_protected_paths(String.t(), git_cmd()) :: [String.t()]
   def dirty_protected_paths(repo_root, cmd) do
     case cmd.(
            "git",
