@@ -61,6 +61,11 @@ defmodule SymphonyElixir.ProdSmokeTest do
       assert contents =~ ~s(- "Todo")
       assert contents =~ ~s(- "Done")
       assert contents =~ "max_concurrent_agents: 1"
+      assert contents =~ "git init -q"
+      assert contents =~ "symphony-prod-smoke@example.invalid"
+      assert contents =~ "printf '%s\\n'"
+      assert contents =~ "Initialize prod smoke workspace"
+      refute contents =~ "git clone"
       assert contents =~ "PROMPT-BODY"
     end
   end
