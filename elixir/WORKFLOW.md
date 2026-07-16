@@ -30,10 +30,14 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  max_consecutive_failures: 5
+  blocked_max_age_ms: 86400000
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 600000
   turn_sandbox_policy:
     type: workspaceWrite
 ---

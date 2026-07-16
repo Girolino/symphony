@@ -49,6 +49,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      parked: %{},
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
@@ -276,6 +277,7 @@ defmodule SymphonyElixir.Orchestrator do
     state =
       state
       |> reconcile_running_issues()
+      |> expire_stale_blocked()
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
@@ -814,7 +816,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked} = state,
+         %State{running: running, claimed: claimed, blocked: blocked, parked: parked} = state,
          active_states,
          terminal_states
        ) do
@@ -823,6 +825,7 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
+      !Map.has_key?(parked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
@@ -1036,6 +1039,15 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
+
+    if breaker_tripped?(next_attempt) do
+      park_issue(state, issue_id, next_attempt, previous_retry, metadata)
+    else
+      do_schedule_issue_retry(state, issue_id, next_attempt, previous_retry, metadata)
+    end
+  end
+
+  defp do_schedule_issue_retry(%State{} = state, issue_id, next_attempt, previous_retry, metadata) do
     delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
@@ -1069,6 +1081,95 @@ defmodule SymphonyElixir.Orchestrator do
             workspace_path: workspace_path
           })
     }
+  end
+
+  # Circuit breaker (CONSTITUTION.md C3): consecutive failures park the ISSUE,
+  # never the system — other issues keep dispatching, and the park always
+  # terminates in a deduplicated ops issue (C4).
+  defp breaker_tripped?(next_attempt) do
+    case Config.settings!().agent.max_consecutive_failures do
+      max when is_integer(max) and max > 0 -> next_attempt > max
+      _ -> false
+    end
+  end
+
+  defp park_issue(%State{} = state, issue_id, attempt, previous_retry, metadata) do
+    identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
+    error = pick_retry_error(previous_retry, metadata) || "unknown error"
+    old_timer = Map.get(previous_retry, :timer_ref)
+
+    if is_reference(old_timer) do
+      Process.cancel_timer(old_timer)
+    end
+
+    Logger.error("Breaker parked issue_id=#{issue_id} issue_identifier=#{identifier} after #{attempt - 1} consecutive failures; filing ops issue")
+
+    file_parked_ops_issue(identifier, attempt - 1, error)
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        claimed: MapSet.put(state.claimed, issue_id),
+        parked:
+          Map.put(state.parked, issue_id, %{
+            issue_id: issue_id,
+            identifier: identifier,
+            error: error,
+            failures: attempt - 1,
+            parked_at: DateTime.utc_now()
+          })
+    }
+  end
+
+  defp file_parked_ops_issue(identifier, failures, error) do
+    Task.start(fn ->
+      title = "breaker parked: #{identifier}"
+
+      body =
+        "The lane circuit breaker parked #{identifier} after #{failures} consecutive failed runs. " <>
+          "Last error: #{error}. Investigate the failure class; the issue stays parked until the daemon restarts or this is resolved."
+
+      case SymphonyElixir.OpsIssue.file(title, body, []) do
+        {:created, issue} -> Logger.warning("Breaker ops issue created: #{issue["identifier"]}")
+        {:existing, issue} -> Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
+        {:error, reason} -> Logger.error("Breaker ops issue filing FAILED (C4 violation risk): #{inspect(reason)}")
+      end
+    end)
+  end
+
+  # Liveness default action for blocked issues (CONSTITUTION.md; REVIEW.md
+  # RV-A5): a blocked entry older than the configured max age re-enters the
+  # retry path instead of waiting forever. Repeated block/expire cycles
+  # increment attempts and eventually trip the breaker.
+  defp expire_stale_blocked(%State{} = state) do
+    case Config.settings!().agent.blocked_max_age_ms do
+      max_age when is_integer(max_age) and max_age > 0 ->
+        now = DateTime.utc_now()
+
+        state.blocked
+        |> Enum.filter(fn {_id, entry} ->
+          DateTime.diff(now, Map.get(entry, :blocked_at) || now, :millisecond) > max_age
+        end)
+        |> Enum.reduce(state, fn {issue_id, entry}, acc ->
+          Logger.warning("Liveness: blocked issue_id=#{issue_id} issue_identifier=#{entry.identifier} exceeded #{max_age}ms; retrying")
+
+          acc = %{
+            acc
+            | blocked: Map.delete(acc.blocked, issue_id),
+              claimed: MapSet.delete(acc.claimed, issue_id)
+          }
+
+          schedule_issue_retry(acc, issue_id, nil, %{
+            identifier: entry.identifier,
+            error: "liveness: blocked longer than #{max_age}ms",
+            worker_host: Map.get(entry, :worker_host),
+            workspace_path: Map.get(entry, :workspace_path)
+          })
+        end)
+
+      _ ->
+        state
+    end
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
