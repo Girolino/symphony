@@ -78,16 +78,18 @@ defmodule SymphonyElixir.DocsCheck do
   end
 
   # Only paths under the RUNNING user's home are verifiable on this machine;
-  # foreign /Users/<someone-else>/ paths are environment documentation, not
-  # dead references, and must not fail the gate on other hosts (CR-002).
+  # foreign paths are environment documentation, not dead references, and must
+  # not fail the gate on other hosts (CR-002). The pattern is derived from the
+  # actual home so detection is portable across macOS (/Users) and Linux CI
+  # (/home) — a hardcoded /Users regex silently detected nothing on Linux.
   defp path_findings(file, line, text) do
     home = System.user_home!()
+    home_pattern = ~r/(#{Regex.escape(home)}\/[A-Za-z0-9._\/\-]+)/
 
-    ~r{(/Users/[A-Za-z0-9._/\-]+)}
+    home_pattern
     |> Regex.scan(text)
     |> Enum.map(fn [_, path] -> String.trim_trailing(path, ".") end)
     |> Enum.uniq()
-    |> Enum.filter(&String.starts_with?(&1, home <> "/"))
     |> Enum.reject(&File.exists?/1)
     |> Enum.map(&%{file: file, line: line, kind: :path, detail: &1})
   end
