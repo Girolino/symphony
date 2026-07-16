@@ -45,6 +45,13 @@ defmodule SymphonyElixir.OpsIssue do
       nodes {
         id
         key
+        states(first: 50) {
+          nodes {
+            id
+            name
+            type
+          }
+        }
       }
     }
   }
@@ -67,9 +74,10 @@ defmodule SymphonyElixir.OpsIssue do
     $title: String!
     $description: String!
     $projectId: String
+    $stateId: String
   ) {
     issueCreate(
-      input: {teamId: $teamId, title: $title, description: $description, projectId: $projectId}
+      input: {teamId: $teamId, title: $title, description: $description, projectId: $projectId, stateId: $stateId}
     ) {
       success
       issue {
@@ -102,9 +110,9 @@ defmodule SymphonyElixir.OpsIssue do
 
     with {:ok, api_key} <- ProdSmoke.resolve_api_key(get_env, bootstrap_path),
          {:ok, nil} <- find_existing(graphql_fun, api_key, team_key, title),
-         {:ok, team_id} <- fetch_team_id(graphql_fun, api_key, team_key) do
+         {:ok, team} <- fetch_team(graphql_fun, api_key, team_key) do
       project_id = resolve_project_id(graphql_fun, api_key, project_slug)
-      create_issue(graphql_fun, api_key, team_id, project_id, title, body)
+      create_issue(graphql_fun, api_key, team, project_id, title, body)
     else
       {:ok, %{} = issue} -> {:existing, issue}
       {:error, reason} -> {:error, reason}
@@ -122,11 +130,24 @@ defmodule SymphonyElixir.OpsIssue do
     end
   end
 
-  defp fetch_team_id(graphql_fun, api_key, team_key) do
+  defp fetch_team(graphql_fun, api_key, team_key) do
     case graphql_fun.(@linear_endpoint, api_key, @team_query, %{key: team_key}) do
-      {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => id} | _]}}}} -> {:ok, id}
+      {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => _} = team | _]}}}} -> {:ok, team}
       {:ok, payload} -> {:error, {:team_not_found, team_key, inspect(payload, limit: 5)}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # New issues must land in a dispatchable (unstarted) state: teams default to
+  # Backlog, which lanes deliberately exclude from active_states.
+  defp dispatchable_state_id(team) do
+    team
+    |> get_in(["states", "nodes"])
+    |> List.wrap()
+    |> Enum.find(&(&1["type"] == "unstarted"))
+    |> case do
+      %{"id" => id} -> id
+      nil -> nil
     end
   end
 
@@ -139,8 +160,14 @@ defmodule SymphonyElixir.OpsIssue do
     end
   end
 
-  defp create_issue(graphql_fun, api_key, team_id, project_id, title, body) do
-    variables = %{teamId: team_id, title: title, description: body, projectId: project_id}
+  defp create_issue(graphql_fun, api_key, team, project_id, title, body) do
+    variables = %{
+      teamId: team["id"],
+      title: title,
+      description: body,
+      projectId: project_id,
+      stateId: dispatchable_state_id(team)
+    }
 
     case graphql_fun.(@linear_endpoint, api_key, @create_issue_mutation, variables) do
       {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => issue}}}} ->

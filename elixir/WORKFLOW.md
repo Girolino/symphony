@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "3c60ffa59268"
   active_states:
     - Todo
     - In Progress
@@ -21,7 +21,7 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 git@github.com:Girolino/symphony.git .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
@@ -352,6 +352,35 @@ FINAL; there is no appeal and no human escalation path.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.
+
+## Upkeep issues (maintenance lane)
+
+An issue titled `Symphony upkeep` (filed by the recurring heartbeat) follows
+this flow instead of the implementation flow. It is the self-improvement
+engine: it converts detected friction into queued work.
+
+1. Run the full gate (`mise exec -- make all` in `elixir/`) and `mix docs.check`.
+   Any failure here is itself a finding.
+2. Inspect the metrics ledger and recent daemon logs for failure/retry
+   patterns (repeated retries on one issue class, breaker parks, stalled
+   sessions).
+3. Reconcile repo hygiene WITHIN the workspace only: report (do not delete)
+   stale branches, parked worktrees, and releases older than the last five in
+   `~/.cache/symphony-releases`.
+4. Re-open `Deferred` issues whose decision-packet re-open condition now
+   holds (move them back to `Todo` with a note).
+5. Review-rule telemetry: if any REVIEW.md rule shows repeated deadlocks,
+   exemptions, or arbiter overturns in recent workpads, file a rule-revision
+   issue.
+6. For every recurring friction found (flaky test, manual step, missing
+   automation), file one deduplicated Linear issue in this project with a
+   concrete, agent-executable description (`mix ops.file_issue` or
+   `linear_graphql`).
+7. Write the optional daily digest to `qa-output/digest-<YYYY-MM-DD>.md` in
+   the workspace repo copy: what shipped, what got parked and why, what was
+   automated, open risks. The digest never gates anything.
+8. Complete this upkeep issue (move to `Done`) even when findings were filed —
+   the findings are the deliverable. Zero findings is also a valid outcome.
 
 ## Workpad template
 

@@ -27,7 +27,25 @@ defmodule SymphonyElixir.OpsIssueTest do
   defp find_issue_response(_scenario), do: {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
 
   defp team_response do
-    {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "team-1", "key" => "SYME2E"}]}}}}
+    {:ok,
+     %{
+       "data" => %{
+         "teams" => %{
+           "nodes" => [
+             %{
+               "id" => "team-1",
+               "key" => "SYME2E",
+               "states" => %{
+                 "nodes" => [
+                   %{"id" => "st-backlog", "name" => "Backlog", "type" => "backlog"},
+                   %{"id" => "st-todo", "name" => "Todo", "type" => "unstarted"}
+                 ]
+               }
+             }
+           ]
+         }
+       }
+     }}
   end
 
   defp project_response(:project_missing), do: {:ok, %{"data" => %{"projects" => %{"nodes" => []}}}}
@@ -71,7 +89,7 @@ defmodule SymphonyElixir.OpsIssueTest do
     assert {:created, %{"identifier" => "SYME2E-42"}} =
              OpsIssue.file("promote FAIL: smoke failed", "body", opts)
 
-    assert_received {:create_variables, %{projectId: "proj-1", teamId: "team-1"}}
+    assert_received {:create_variables, %{projectId: "proj-1", teamId: "team-1", stateId: "st-todo"}}
   end
 
   test "files team-only when the project cannot be resolved" do
@@ -125,7 +143,7 @@ defmodule SymphonyElixir.OpsIssueTest do
     create_rejected = fn _e, _k, query, _v ->
       cond do
         String.contains?(query, "SymphonyOpsFindIssue") -> {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
-        String.contains?(query, "SymphonyOpsTeam") -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "key" => "K"}]}}}}
+        String.contains?(query, "SymphonyOpsTeam") -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "key" => "K", "states" => %{"nodes" => []}}]}}}}
         String.contains?(query, "SymphonyOpsCreateIssue") -> {:ok, %{"data" => %{"issueCreate" => %{"success" => false}}}}
         true -> {:error, :unused}
       end
@@ -137,7 +155,7 @@ defmodule SymphonyElixir.OpsIssueTest do
     create_error = fn _e, _k, query, _v ->
       cond do
         String.contains?(query, "SymphonyOpsFindIssue") -> {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
-        String.contains?(query, "SymphonyOpsTeam") -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "key" => "K"}]}}}}
+        String.contains?(query, "SymphonyOpsTeam") -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "key" => "K", "states" => %{"nodes" => []}}]}}}}
         String.contains?(query, "SymphonyOpsCreateIssue") -> {:error, {:linear_api_status, 500}}
         true -> {:error, :unused}
       end
