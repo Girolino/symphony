@@ -65,9 +65,7 @@ defmodule Mix.Tasks.Harness.CheckTest do
 
     assert "contentpipeline" in terms
     assert "natuvera" in terms
-    # "alpinereach" also contains "alpine": overlapping terms are both flagged.
     assert "alpinereach" in terms
-    assert "alpine" in terms
     assert Enum.all?(findings, &(&1.file == file))
   end
 
@@ -76,7 +74,10 @@ defmodule Mix.Tasks.Harness.CheckTest do
   end
 
   test "covers default_terms, single-file scan, and missing paths" do
-    assert "alpine" in HarnessCheck.default_terms()
+    assert "alpinereach" in HarnessCheck.default_terms()
+    # Bare "alpine" is deliberately NOT a term: Alpine Linux references are
+    # legitimate in a generic harness (review round-3 CR-004).
+    refute "alpine" in HarnessCheck.default_terms()
 
     # Scanning the checker's own file yields nothing (skipped by construction).
     assert HarnessCheck.product_policy_findings(["lib/symphony_elixir/harness_check.ex"]) == []
@@ -90,5 +91,11 @@ defmodule Mix.Tasks.Harness.CheckTest do
 
     assert [%{term: "natuvera"}] = HarnessCheck.product_policy_findings([file])
     assert HarnessCheck.product_policy_findings(["/nonexistent/path"]) == []
+  end
+
+  test "raises on invalid options" do
+    assert_raise Mix.Error, ~r/invalid options/, fn ->
+      Check.run(["--bogus"])
+    end
   end
 end

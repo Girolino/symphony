@@ -16,7 +16,11 @@ defmodule Mix.Tasks.Harness.Check do
 
   @impl Mix.Task
   def run(args) do
-    {opts, _argv, _invalid} = OptionParser.parse(args, strict: @switches)
+    {opts, _argv, invalid} = OptionParser.parse(args, strict: @switches)
+
+    if invalid != [] do
+      Mix.raise("harness.check: invalid options #{inspect(invalid)}")
+    end
 
     paths = Keyword.get_values(opts, :paths)
     scanned_paths = if paths == [], do: @default_paths, else: paths

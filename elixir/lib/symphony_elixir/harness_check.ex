@@ -9,8 +9,9 @@ defmodule SymphonyElixir.HarnessCheck do
   """
 
   @default_terms [
-    "alpine",
     "alpinereach",
+    "alpine reach",
+    "alpine-reach",
     "dr-thomas",
     "drthomas",
     "content-pipeline",

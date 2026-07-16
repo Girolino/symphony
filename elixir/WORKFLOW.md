@@ -46,7 +46,7 @@ Continuation context:
 - This is retry attempt #{{ attempt }} because the ticket is still in an active state.
 - Resume from the current workspace state instead of restarting from scratch.
 - Do not repeat already-completed investigation or validation unless needed for new code changes.
-- Do not end the turn while the issue remains in an active state unless you are blocked by missing required permissions/secrets.
+- Do not end the turn while the issue remains in an active state unless you are blocked by missing required permissions/secrets, or you have just crossed a role boundary (see below).
   {% endif %}
 
 Issue context:
@@ -74,6 +74,21 @@ Work only in the provided repository copy. Do not touch any other path.
 ## Prerequisite: Linear MCP or `linear_graphql` tool is available
 
 The agent should be able to talk to Linear, either via a configured Linear MCP server or injected `linear_graphql` tool. If none are present, stop and ask the user to configure Linear.
+
+## Role boundaries (session isolation — required)
+
+`In Progress`/`Rework` (implementer), `Agent Review` (reviewer), and `Arbiter`
+(arbiter) are distinct ROLES. One session must never play two roles: a
+reviewer that shares the implementer's context cannot judge it independently.
+
+- The moment you transition the issue into a state owned by a DIFFERENT role
+  (implementer -> `Agent Review`, reviewer -> `In Progress` or `Arbiter`,
+  arbiter -> `In Progress` or `Merging`), update the workpad and END THE
+  SESSION immediately. Do not continue working the issue in the new state.
+- The orchestrator will dispatch a fresh session for the new state; that
+  session reads the current status and assumes the matching role.
+- `Merging` is a continuation of whichever role sent the issue there and may
+  be handled by the next fresh session.
 
 ## Default posture
 
