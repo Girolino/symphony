@@ -243,6 +243,7 @@ if [ "$SKIP_GATE" -eq 1 ]; then
   log "gate skipped by flag"
 else
   log "running full gate on $SHORT_SHA"
+  (cd "$ELIXIR_DIR" && mise trust --quiet 2>/dev/null || true)
   (cd "$ELIXIR_DIR" && mise exec -- make all)
 fi
 
