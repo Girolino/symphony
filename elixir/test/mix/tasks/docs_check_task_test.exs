@@ -32,7 +32,7 @@ defmodule Mix.Tasks.Docs.CheckTest do
   test "flags dead paths, targets, tasks, and sections; prose is ignored", %{root: root} do
     File.write!(Path.join(root, "docs/stale.md"), """
     This should make sense in prose without findings.
-    Dead path: /Users/nonexistent-user-xyz/missing
+    Dead path: #{System.user_home!()}/nonexistent-docs-check-xyz/missing
     Dead fence:
     ```bash
     make bogus-target
@@ -59,7 +59,7 @@ defmodule Mix.Tasks.Docs.CheckTest do
 
   test "honors exemptions file", %{root: root} do
     doc = Path.join(root, "docs/intentional.md")
-    File.write!(doc, "Planned home: /Users/nonexistent-user-xyz/future\n")
+    File.write!(doc, "Planned home: #{System.user_home!()}/nonexistent-docs-check-xyz/future\n")
 
     exemptions = Path.join(root, ".docs-check-exemptions")
     File.write!(exemptions, "# planned paths\n#{doc}:1\n")
@@ -70,7 +70,7 @@ defmodule Mix.Tasks.Docs.CheckTest do
 
   test "default exemptions file at repo root is picked up automatically", %{root: root} do
     doc = Path.join(root, "docs/intentional.md")
-    File.write!(doc, "Planned home: /Users/nonexistent-user-xyz/future\n")
+    File.write!(doc, "Planned home: #{System.user_home!()}/nonexistent-docs-check-xyz/future\n")
     File.write!(Path.join(root, ".docs-check-exemptions"), "#{doc}\n")
 
     output = capture_io(fn -> Check.run(["--repo-root", root]) end)
@@ -81,6 +81,15 @@ defmodule Mix.Tasks.Docs.CheckTest do
     assert_raise Mix.Error, ~r/invalid options/, fn ->
       Check.run(["--bogus"])
     end
+  end
+
+  test "foreign-user absolute paths are documentation, not dead references" do
+    root = Path.join(System.tmp_dir!(), "docs-foreign-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(root, "docs"))
+    on_exit(fn -> File.rm_rf(root) end)
+    File.write!(Path.join(root, "docs/env.md"), "Runs at /Users/someone-else/deploy/root\n")
+
+    assert DocsCheck.findings(DocsCheck.default_doc_paths(root), repo_root: root) == []
   end
 
   test "the real repo docs are currently alive" do

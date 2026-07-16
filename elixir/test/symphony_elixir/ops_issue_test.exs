@@ -92,11 +92,13 @@ defmodule SymphonyElixir.OpsIssueTest do
     assert_received {:create_variables, %{projectId: "proj-1", teamId: "team-1", stateId: "st-todo"}}
   end
 
-  test "files team-only when the project cannot be resolved" do
+  test "a configured but unresolvable project fails loudly instead of team-only" do
     opts = Keyword.put(base_opts(:project_missing), :project_slug, "missing-slug")
 
-    assert {:created, _issue} = OpsIssue.file("watchdog restart", "body", opts)
-    assert_received {:create_variables, %{projectId: nil}}
+    assert {:error, {:project_not_found, "missing-slug", _}} =
+             OpsIssue.file("watchdog restart", "body", opts)
+
+    refute_received {:create_variables, _}
   end
 
   test "propagates key-resolution failure by name only" do
@@ -189,5 +191,19 @@ defmodule SymphonyElixir.OpsIssueTest do
 
     opts = [graphql_fun: weird, get_env: fn "LINEAR_API_KEY" -> "k" end]
     assert {:error, {:dedup_lookup_failed, _}} = OpsIssue.file("t", "b", opts)
+  end
+
+  test "a project lookup transport error also aborts filing" do
+    transport_down = fn _e, _k, query, _v ->
+      cond do
+        String.contains?(query, "SymphonyOpsFindIssue") -> {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}}
+        String.contains?(query, "SymphonyOpsTeam") -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "key" => "K", "states" => %{"nodes" => []}}]}}}}
+        String.contains?(query, "SymphonyOpsProject") -> {:error, :timeout}
+        true -> {:error, :unused}
+      end
+    end
+
+    opts = [graphql_fun: transport_down, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: "slug-1"]
+    assert {:error, {:project_lookup_failed, :timeout}} = OpsIssue.file("t", "b", opts)
   end
 end

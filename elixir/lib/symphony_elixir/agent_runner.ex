@@ -111,18 +111,16 @@ defmodule SymphonyElixir.AgentRunner do
 
       case continue_with_issue?(issue, issue_state_fetcher) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+          ctx = %{
+            app_session: app_session,
+            workspace: workspace,
+            codex_update_recipient: codex_update_recipient,
+            opts: opts,
+            issue_state_fetcher: issue_state_fetcher,
+            max_turns: max_turns
+          }
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+          continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, turn_number)
 
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
@@ -137,6 +135,45 @@ defmodule SymphonyElixir.AgentRunner do
       end
     end
   end
+
+  defp continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, turn_number) do
+    if role_boundary_crossed?(issue.state, refreshed_issue.state) do
+      Logger.info("Ending session at role boundary for #{issue_context(refreshed_issue)}: #{inspect(issue.state)} -> #{inspect(refreshed_issue.state)}; a fresh session will own the new role")
+
+      :ok
+    else
+      Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{ctx.max_turns}")
+
+      do_run_codex_turns(
+        ctx.app_session,
+        ctx.workspace,
+        refreshed_issue,
+        ctx.codex_update_recipient,
+        ctx.opts,
+        ctx.issue_state_fetcher,
+        turn_number + 1,
+        ctx.max_turns
+      )
+    end
+  end
+
+  @doc false
+  @spec role_boundary_crossed?(String.t() | nil, String.t() | nil) :: boolean()
+  def role_boundary_crossed?(start_state, current_state)
+      when is_binary(start_state) and is_binary(current_state) do
+    boundaries =
+      Config.settings!().agent.role_boundary_states
+      |> Enum.map(&normalize_issue_state/1)
+      |> MapSet.new()
+
+    start_n = normalize_issue_state(start_state)
+    current_n = normalize_issue_state(current_state)
+
+    current_n != start_n and
+      (MapSet.member?(boundaries, current_n) or MapSet.member?(boundaries, start_n))
+  end
+
+  def role_boundary_crossed?(_start_state, _current_state), do: false
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 

@@ -32,6 +32,9 @@ agent:
   max_turns: 20
   max_consecutive_failures: 5
   blocked_max_age_ms: 86400000
+  role_boundary_states:
+    - "Agent Review"
+    - "Arbiter"
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never

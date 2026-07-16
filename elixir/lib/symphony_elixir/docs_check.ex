@@ -77,11 +77,17 @@ defmodule SymphonyElixir.DocsCheck do
     |> Enum.map_join(" ", fn [_, span] -> span end)
   end
 
+  # Only paths under the RUNNING user's home are verifiable on this machine;
+  # foreign /Users/<someone-else>/ paths are environment documentation, not
+  # dead references, and must not fail the gate on other hosts (CR-002).
   defp path_findings(file, line, text) do
+    home = System.user_home!()
+
     ~r{(/Users/[A-Za-z0-9._/\-]+)}
     |> Regex.scan(text)
     |> Enum.map(fn [_, path] -> String.trim_trailing(path, ".") end)
     |> Enum.uniq()
+    |> Enum.filter(&String.starts_with?(&1, home <> "/"))
     |> Enum.reject(&File.exists?/1)
     |> Enum.map(&%{file: file, line: line, kind: :path, detail: &1})
   end

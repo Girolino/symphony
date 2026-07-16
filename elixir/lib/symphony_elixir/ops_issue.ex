@@ -108,10 +108,14 @@ defmodule SymphonyElixir.OpsIssue do
     get_env = Keyword.get(opts, :get_env, &System.get_env/1)
     bootstrap_path = Keyword.get(opts, :bootstrap_path, ProdSmoke.default_bootstrap_path())
 
+    # Known race, accepted: two concurrent filers can both pass the dedup
+    # lookup and create duplicates. Single-host serialization (promotion lock,
+    # one lane daemon) makes this rare; Linear offers no uniqueness constraint
+    # to close it server-side. Revisit if duplicate ops issues ever appear.
     with {:ok, api_key} <- ProdSmoke.resolve_api_key(get_env, bootstrap_path),
          {:ok, nil} <- find_existing(graphql_fun, api_key, team_key, title),
-         {:ok, team} <- fetch_team(graphql_fun, api_key, team_key) do
-      project_id = resolve_project_id(graphql_fun, api_key, project_slug)
+         {:ok, team} <- fetch_team(graphql_fun, api_key, team_key),
+         {:ok, project_id} <- resolve_project_id(graphql_fun, api_key, project_slug) do
       create_issue(graphql_fun, api_key, team, project_id, title, body)
     else
       {:ok, %{} = issue} -> {:existing, issue}
@@ -153,12 +157,15 @@ defmodule SymphonyElixir.OpsIssue do
     end
   end
 
-  defp resolve_project_id(_graphql_fun, _api_key, nil), do: nil
+  # A configured project that cannot be resolved must fail loudly: a
+  # team-only issue is invisible to a project-scoped lane (CR-004).
+  defp resolve_project_id(_graphql_fun, _api_key, nil), do: {:ok, nil}
 
   defp resolve_project_id(graphql_fun, api_key, slug) do
     case graphql_fun.(@linear_endpoint, api_key, @find_project_query, %{slug: slug}) do
-      {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"id" => id} | _]}}}} -> id
-      _ -> nil
+      {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"id" => id} | _]}}}} -> {:ok, id}
+      {:ok, payload} -> {:error, {:project_not_found, slug, inspect(payload, limit: 5)}}
+      {:error, reason} -> {:error, {:project_lookup_failed, reason}}
     end
   end
 

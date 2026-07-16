@@ -47,4 +47,11 @@ defmodule SymphonyElixir.ReviewContractTest do
     assert review =~ "no-rejection-without-a-rule"
     assert review =~ "arbiter"
   end
+
+  test "role boundaries are enforced by the harness, not just the prompt" do
+    fm = front_matter!()
+    boundaries = get_in(fm, ["agent", "role_boundary_states"])
+    assert "Agent Review" in boundaries
+    assert "Arbiter" in boundaries
+  end
 end

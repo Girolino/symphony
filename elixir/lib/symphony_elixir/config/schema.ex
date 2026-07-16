@@ -137,6 +137,9 @@ defmodule SymphonyElixir.Config.Schema do
       # older than the max age re-enter the retry path (default action).
       field(:max_consecutive_failures, :integer, default: nil)
       field(:blocked_max_age_ms, :integer, default: nil)
+      # Role isolation: crossing into/out of these states ends the session so
+      # the next dispatch is a fresh session in the new role (empty = off).
+      field(:role_boundary_states, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -150,7 +153,8 @@ defmodule SymphonyElixir.Config.Schema do
           :max_retry_backoff_ms,
           :max_concurrent_agents_by_state,
           :max_consecutive_failures,
-          :blocked_max_age_ms
+          :blocked_max_age_ms,
+          :role_boundary_states
         ],
         empty_values: []
       )
