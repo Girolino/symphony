@@ -93,7 +93,16 @@ flip_to() {
   local tmp_link
   tmp_link="$(mktemp -u "$RELEASES_ROOT/.current.XXXXXX")"
   ln -s "$target" "$tmp_link"
-  mv -f "$tmp_link" "$CURRENT_LINK"
+  # -h replaces the symlink itself; plain -f follows a symlink-to-directory and
+  # drops the temp link INSIDE the old release, silently keeping the old pin.
+  mv -fh "$tmp_link" "$CURRENT_LINK"
+
+  local resolved
+  resolved="$(readlink "$CURRENT_LINK" || true)"
+  if [ "$resolved" != "$target" ]; then
+    log "FAIL: current flip did not land (points at ${resolved:-nothing})"
+    return 1
+  fi
   log "current -> $target"
 }
 
