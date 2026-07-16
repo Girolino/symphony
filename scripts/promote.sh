@@ -138,8 +138,12 @@ EOF
   BOOT_PID=$!
 
   local deadline=$((SECONDS + 30))
+  local state_body
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if curl -sf -m 2 "http://127.0.0.1:$BOOT_PORT/api/v1/state" | grep -q '"status":"healthy"'; then
+    # No pipeline here: under pipefail an early-exiting grep SIGPIPEs curl and
+    # kills the whole promotion (observed as exit 141).
+    state_body="$(curl -sf -m 2 "http://127.0.0.1:$BOOT_PORT/api/v1/state" || true)"
+    if [[ "$state_body" == *'"status":"healthy"'* ]]; then
       log "boot check healthy"
       cleanup_boot
       return 0
@@ -184,7 +188,11 @@ if [ -x "$RELEASE_DIR/elixir/bin/symphony" ]; then
 else
   log "building release $SHORT_SHA"
   BUILD_TMP="$(mktemp -d "$RELEASES_ROOT/.build.XXXXXX" 2>/dev/null || mktemp -d)"
-  git archive "$SHA" | tar -x -C "$BUILD_TMP"
+  # Archive to a file instead of piping into tar: a transient consumer exit
+  # under pipefail would SIGPIPE git-archive and abort the promotion.
+  git archive "$SHA" --output="$BUILD_TMP/src.tar"
+  tar -xf "$BUILD_TMP/src.tar" -C "$BUILD_TMP"
+  rm -f "$BUILD_TMP/src.tar"
   (cd "$BUILD_TMP/elixir" && mise trust --quiet 2>/dev/null || true)
   (cd "$BUILD_TMP/elixir" && mise exec -- mix setup && mise exec -- mix build)
   mkdir -p "$RELEASES_ROOT"
