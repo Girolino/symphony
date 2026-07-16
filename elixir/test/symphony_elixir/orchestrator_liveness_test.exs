@@ -70,6 +70,31 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
   defp restore_env_value(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_env_value(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
+  # Poll orchestrator state until `fun` returns true, ticking each round.
+  # Timing-based sleeps flake under load (the CI/auto-promote gate); this drives
+  # the state machine deterministically regardless of machine speed.
+  defp eventually(pid, fun, timeout_ms \\ 3_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(pid, fun, deadline)
+  end
+
+  defp do_eventually(pid, fun, deadline) do
+    state = :sys.get_state(pid)
+
+    cond do
+      fun.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("condition not reached; last state blocked=#{inspect(Map.keys(state.blocked))} parked=#{inspect(Map.keys(state.parked))} retry=#{inspect(Map.keys(state.retry_attempts))}")
+
+      true ->
+        send(pid, :tick)
+        Process.sleep(25)
+        do_eventually(pid, fun, deadline)
+    end
+  end
+
   defp start_orchestrator!(issues) do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
     name = Module.concat(__MODULE__, :"Orchestrator#{System.unique_integer([:positive])}")
@@ -129,9 +154,10 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
       |> Map.put(:claimed, MapSet.new([issue_id, "occupant-1"]))
     end)
 
-    send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+    state =
+      eventually(pid, fn st ->
+        not Map.has_key?(st.blocked, issue_id) and match?(%{failures: 3}, Map.get(st.retry_attempts, issue_id))
+      end)
 
     refute Map.has_key?(state.blocked, issue_id), "stale blocked entry must not wait forever"
     assert %{failures: 3} = Map.get(state.retry_attempts, issue_id), "carried failures must advance"
@@ -166,8 +192,8 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
 
     # Inject the failure signal the orchestrator would receive on agent crash.
     send(pid, {:DOWN, ref, :process, agent_pid, :killed})
-    Process.sleep(200)
-    state = :sys.get_state(pid)
+
+    state = eventually(pid, fn st -> Map.has_key?(st.parked, issue_id) end)
 
     assert Map.has_key?(state.parked, issue_id), "breaker must park after max consecutive failures"
     refute Map.has_key?(state.retry_attempts, issue_id)
@@ -176,9 +202,7 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
 
     # Terminal reconciliation releases the park (a human/lane resolved it).
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{hd([issue]) | state: "Done"}])
-    send(pid, :tick)
-    Process.sleep(150)
-    state = :sys.get_state(pid)
+    state = eventually(pid, fn st -> not Map.has_key?(st.parked, issue_id) end)
 
     refute Map.has_key?(state.parked, issue_id), "terminal issues must unpark"
     refute MapSet.member?(state.claimed, issue_id)
