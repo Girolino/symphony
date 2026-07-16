@@ -68,11 +68,14 @@ defmodule SymphonyElixir.OpsIssueTest do
      }}
   end
 
+  # project_slug is pinned so ambient SYMPHONY_OPS_PROJECT_SLUG (set in real
+  # promotion environments) can never change which branches these tests take.
   defp base_opts(scenario) do
     [
       graphql_fun: fake_graphql(scenario),
       get_env: fn "LINEAR_API_KEY" -> "test-key" end,
-      team_key: "SYME2E"
+      team_key: "SYME2E",
+      project_slug: nil
     ]
   end
 
@@ -128,7 +131,7 @@ defmodule SymphonyElixir.OpsIssueTest do
       end
     end
 
-    opts = [graphql_fun: graphql, get_env: fn "LINEAR_API_KEY" -> "k" end, team_key: "NOPE"]
+    opts = [graphql_fun: graphql, get_env: fn "LINEAR_API_KEY" -> "k" end, team_key: "NOPE", project_slug: nil]
     assert {:error, {:team_not_found, "NOPE", _}} = OpsIssue.file("t", "b", opts)
   end
 
@@ -139,7 +142,7 @@ defmodule SymphonyElixir.OpsIssueTest do
         else: {:error, {:linear_api_request, :timeout}}
     end
 
-    opts = [graphql_fun: down, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    opts = [graphql_fun: down, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: nil]
     assert {:error, {:linear_api_request, :timeout}} = OpsIssue.file("t", "b", opts)
 
     create_rejected = fn _e, _k, query, _v ->
@@ -151,7 +154,7 @@ defmodule SymphonyElixir.OpsIssueTest do
       end
     end
 
-    opts = [graphql_fun: create_rejected, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    opts = [graphql_fun: create_rejected, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: nil]
     assert {:error, {:issue_create_failed, _}} = OpsIssue.file("t", "b", opts)
 
     create_error = fn _e, _k, query, _v ->
@@ -163,7 +166,7 @@ defmodule SymphonyElixir.OpsIssueTest do
       end
     end
 
-    opts = [graphql_fun: create_error, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    opts = [graphql_fun: create_error, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: nil]
     assert {:error, {:linear_api_status, 500}} = OpsIssue.file("t", "b", opts)
   end
 
@@ -177,7 +180,7 @@ defmodule SymphonyElixir.OpsIssueTest do
       end
     end
 
-    opts = [graphql_fun: lookup_down, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    opts = [graphql_fun: lookup_down, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: nil]
     assert {:error, {:dedup_lookup_failed, :timeout}} = OpsIssue.file("promote FAIL", "b", opts)
     refute_received {:unexpected_call, _}
   end
@@ -189,7 +192,7 @@ defmodule SymphonyElixir.OpsIssueTest do
         else: {:error, :should_not_be_called}
     end
 
-    opts = [graphql_fun: weird, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    opts = [graphql_fun: weird, get_env: fn "LINEAR_API_KEY" -> "k" end, project_slug: nil]
     assert {:error, {:dedup_lookup_failed, _}} = OpsIssue.file("t", "b", opts)
   end
 
