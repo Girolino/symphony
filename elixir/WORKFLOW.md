@@ -38,11 +38,16 @@ agent:
 codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
-  thread_sandbox: workspace-write
+  # The Codex workspace-write sandbox denies .git writes, which blocked three
+  # real lane runs (SYM-9/11/12). Full access matches the proven production
+  # lanes; write discipline is enforced by the prompt, constitution.check,
+  # and the Agent Review lane instead of the OS sandbox.
+  thread_sandbox: danger-full-access
   turn_timeout_ms: 3600000
+  read_timeout_ms: 10000
   stall_timeout_ms: 600000
   turn_sandbox_policy:
-    type: workspaceWrite
+    type: dangerFullAccess
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
