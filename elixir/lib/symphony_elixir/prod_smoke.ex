@@ -578,12 +578,32 @@ defmodule SymphonyElixir.ProdSmoke do
       timed(fn ->
         daemon_result = cleanup_daemon(context, daemon)
         project_result = cleanup_project(context, api_key, linear)
+        logs_result = preserve_logs_on_failure(steps, context)
         fs_result = safe(fn -> File.rm_rf!(context.smoke_root) end)
 
-        {:pass, "daemon=#{inspect(daemon_result)} project=#{inspect(project_result)} fs=#{inspect(fs_result)}", nil}
+        {:pass,
+         "daemon=#{inspect(daemon_result)} project=#{inspect(project_result)} " <>
+           "logs=#{inspect(logs_result)} fs=#{inspect(fs_result)}", nil}
       end)
 
     [step("cleanup", status, elapsed, detail) | steps]
+  end
+
+  # A FAIL report without the daemon's own logs cannot be triaged by an agent,
+  # so failed journeys keep their logs under the report directory.
+  defp preserve_logs_on_failure(steps, context) do
+    logs_dir = Path.join(context.smoke_root, "logs")
+
+    if Enum.any?(steps, &(&1.status == :fail)) and File.dir?(logs_dir) do
+      safe(fn ->
+        dest = Path.join(context.report_dir, "prod-smoke-failed-logs-#{System.unique_integer([:positive])}")
+        File.mkdir_p!(context.report_dir)
+        File.cp_r!(logs_dir, dest)
+        dest
+      end)
+    else
+      :skipped
+    end
   end
 
   defp completion_probe(context, api_key, issue_id, marker) do

@@ -53,7 +53,13 @@ defmodule SymphonyElixir.OpsTransport do
           "--port",
           Integer.to_string(port)
         ],
-        env: [{~c"LINEAR_API_KEY", String.to_charlist(Map.fetch!(env, "LINEAR_API_KEY"))}]
+        env: [
+          {~c"LINEAR_API_KEY", String.to_charlist(Map.fetch!(env, "LINEAR_API_KEY"))},
+          # Interactive agent sessions export NODE_OPTIONS preloads pointing at
+          # session-scoped tmp files; a codex (Node) subprocess inheriting them
+          # dies at boot. The daemon must see a clean Node environment.
+          {~c"NODE_OPTIONS", false}
+        ]
       ])
 
     case Port.info(port_ref, :os_pid) do

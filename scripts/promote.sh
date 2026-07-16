@@ -18,6 +18,10 @@
 # default full run is the promotion contract).
 set -euo pipefail
 
+# Interactive agent sessions leak NODE_OPTIONS preloads that kill any Node
+# subprocess (codex) spawned downstream. Promotion always runs clean.
+unset NODE_OPTIONS
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ELIXIR_DIR="$REPO_ROOT/elixir"
