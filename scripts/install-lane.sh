@@ -19,7 +19,7 @@ mkdir -p "$LOGS_ROOT" "$HOME/Library/LaunchAgents"
 
 for label in com.symphony.lane com.symphony.lane-watchdog com.symphony.credential-probe com.symphony.auto-promote; do
   plist="$HOME/Library/LaunchAgents/$label.plist"
-  sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOGS_ROOT__|$LOGS_ROOT|g" \
+  sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOGS_ROOT__|$LOGS_ROOT|g" -e "s|__HOME__|$HOME|g" \
     "$SCRIPT_DIR/launchd/$label.plist.template" > "$plist"
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$plist"

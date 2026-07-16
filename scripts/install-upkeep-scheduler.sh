@@ -16,7 +16,7 @@ case "$REPO_ROOT$LOGS_ROOT" in
 esac
 
 mkdir -p "$LOGS_ROOT" "$HOME/Library/LaunchAgents"
-sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOGS_ROOT__|$LOGS_ROOT|g" \
+sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" -e "s|__LOGS_ROOT__|$LOGS_ROOT|g" -e "s|__HOME__|$HOME|g" \
   "$SCRIPT_DIR/launchd/$LABEL.plist.template" > "$PLIST"
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
