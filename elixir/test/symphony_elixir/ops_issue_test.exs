@@ -161,4 +161,15 @@ defmodule SymphonyElixir.OpsIssueTest do
     assert {:error, {:dedup_lookup_failed, :timeout}} = OpsIssue.file("promote FAIL", "b", opts)
     refute_received {:unexpected_call, _}
   end
+
+  test "CR-001: a malformed dedup lookup payload also aborts filing" do
+    weird = fn _e, _k, query, _v ->
+      if String.contains?(query, "SymphonyOpsFindIssue"),
+        do: {:ok, %{"unexpected" => true}},
+        else: {:error, :should_not_be_called}
+    end
+
+    opts = [graphql_fun: weird, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    assert {:error, {:dedup_lookup_failed, _}} = OpsIssue.file("t", "b", opts)
+  end
 end

@@ -612,7 +612,6 @@ defmodule SymphonyElixir.ProdSmoke do
 
   defp cleanup_ok?(:project, {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}), do: true
 
-  defp cleanup_ok?(:fs, {paths, []}) when is_list(paths), do: true
   defp cleanup_ok?(:fs, paths) when is_list(paths), do: true
   defp cleanup_ok?(_kind, _result), do: false
 

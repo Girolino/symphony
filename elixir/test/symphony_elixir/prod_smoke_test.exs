@@ -773,4 +773,30 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
     assert {:error, report} = ProdSmoke.run(opts(graphql_fun: canceled, timeout_ms: 20))
     assert report.failure =~ "await-completion"
   end
+
+  test "preserves daemon logs under the report dir when the journey fails" do
+    dirs = ctx_dirs()
+    smoke_root = Path.join(dirs.run_dir, "root")
+    report_dir = Path.join(dirs.run_dir, "reports")
+    logs_dir = Path.join(smoke_root, "logs")
+    File.mkdir_p!(logs_dir)
+    File.write!(Path.join(logs_dir, "symphony.log"), "boom")
+
+    o =
+      opts(
+        smoke_root: smoke_root,
+        report_dir: report_dir,
+        graphql_fun: fn _e, _k, q, _v ->
+          if String.contains?(q, "Team"),
+            do: {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}},
+            else: {:error, :unused}
+        end
+      )
+
+    assert {:error, _report} = ProdSmoke.run(o)
+
+    preserved = report_dir |> File.ls!() |> Enum.filter(&String.starts_with?(&1, "prod-smoke-failed-logs-"))
+    assert [dir] = preserved
+    assert File.exists?(Path.join([report_dir, dir, "symphony.log"]))
+  end
 end
