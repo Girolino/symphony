@@ -1144,8 +1144,12 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp ops_issue_filer do
+    Application.get_env(:symphony_elixir, :ops_issue_filer, SymphonyElixir.OpsIssue)
+  end
+
   defp file_parked_ops_issue_with_retry(title, body) do
-    case SymphonyElixir.OpsIssue.file(title, body, []) do
+    case ops_issue_filer().file(title, body, []) do
       {:created, issue} ->
         Logger.warning("Breaker ops issue created: #{issue["identifier"]}")
 
@@ -1159,7 +1163,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp file_parked_ops_issue_final(title, body, first_reason) do
-    case SymphonyElixir.OpsIssue.file(title, body, []) do
+    case ops_issue_filer().file(title, body, []) do
       {:created, issue} ->
         Logger.warning("Breaker ops issue created on retry: #{issue["identifier"]}")
 
