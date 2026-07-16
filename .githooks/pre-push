@@ -7,6 +7,12 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT/elixir"
 
+# git exports GIT_DIR/GIT_INDEX_FILE/... to hooks; that environment leaks into
+# the test suite's own git subprocesses (workspace clone tests) and makes them
+# resolve the wrong repository. Scrub it so tests see a clean environment.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_QUARANTINE_PATH
+
 echo "[pre-push] mix format --check-formatted"
 mise exec -- mix format --check-formatted
 
