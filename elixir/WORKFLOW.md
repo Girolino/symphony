@@ -133,7 +133,7 @@ reviewer that shares the implementer's context cannot judge it independently.
 - `In Progress` -> implementation actively underway.
 - `Agent Review` -> PR is attached and validated; a reviewer session judges it against REVIEW.md.
 - `Arbiter` -> a bounded-rounds deadlock; the arbiter session decides with final authority.
-- `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
+- `Merging` -> approved by the reviewer or arbiter lane; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
 
