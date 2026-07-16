@@ -132,6 +132,14 @@ defmodule SymphonyElixir.ProdSmoke do
   }
   """
 
+  @cancel_issue_mutation """
+  mutation SymphonyProdSmokeCancelIssue($id: String!, $stateId: String!) {
+    issueUpdate(id: $id, input: {stateId: $stateId}) {
+      success
+    }
+  }
+  """
+
   @type step :: %{
           name: String.t(),
           status: :pass | :fail | :skip,
@@ -583,7 +591,9 @@ defmodule SymphonyElixir.ProdSmoke do
   defp cleanup(steps, context, api_key, linear, daemon) do
     {status, detail, elapsed, _} =
       timed(fn ->
+        journey_failed? = Enum.any?(steps, &(&1.status == :fail))
         daemon_result = cleanup_daemon(context, daemon)
+        issue_result = cleanup_issue(context, api_key, linear, journey_failed?)
         project_result = cleanup_project(context, api_key, linear)
         logs_result = preserve_logs_on_failure(steps, context)
         fs_result = safe(fn -> File.rm_rf!(context.smoke_root) end)
@@ -592,23 +602,51 @@ defmodule SymphonyElixir.ProdSmoke do
         # a promotion cannot be declared live over an unfinished cleanup.
         # Log preservation is diagnostic-only and never fails the run.
         cleanup_status =
-          if cleanup_ok?(:daemon, daemon_result) and cleanup_ok?(:project, project_result) and
-               cleanup_ok?(:fs, fs_result) do
+          if cleanup_ok?(:daemon, daemon_result) and cleanup_ok?(:issue, issue_result) and
+               cleanup_ok?(:project, project_result) and cleanup_ok?(:fs, fs_result) do
             :pass
           else
             :fail
           end
 
         {cleanup_status,
-         "daemon=#{inspect(daemon_result)} project=#{inspect(project_result)} " <>
+         "daemon=#{inspect(daemon_result)} issue=#{inspect(issue_result)} " <>
+           "project=#{inspect(project_result)} " <>
            "logs=#{inspect(logs_result)} fs=#{inspect(fs_result)}", nil}
       end)
 
     [step("cleanup", status, elapsed, detail) | steps]
   end
 
+  # A failed journey must not leave its disposable issue in an active state:
+  # completing the project does not transition its issues.
+  defp cleanup_issue(context, api_key, %{issue: %{"id" => issue_id}, team: team}, true)
+       when is_binary(api_key) do
+    safe(fn ->
+      canceled_state =
+        team
+        |> get_in(["states", "nodes"])
+        |> List.wrap()
+        |> Enum.find(&(&1["type"] == "canceled"))
+
+      case canceled_state do
+        %{"id" => state_id} ->
+          context.graphql_fun.(@linear_endpoint, api_key, @cancel_issue_mutation, %{
+            id: issue_id,
+            stateId: state_id
+          })
+
+        nil ->
+          {:error, :no_canceled_state}
+      end
+    end)
+  end
+
+  defp cleanup_issue(_context, _api_key, _linear, _journey_failed?), do: :skipped
+
   defp cleanup_ok?(_kind, :skipped), do: true
   defp cleanup_ok?(:daemon, :ok), do: true
+  defp cleanup_ok?(:issue, {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}), do: true
 
   defp cleanup_ok?(:project, {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}), do: true
 

@@ -187,8 +187,10 @@ rollback_and_fail() {
   log "$reason; rolling back"
   local note
   if [ -n "$PREVIOUS_TARGET" ]; then
-    flip_to "$PREVIOUS_TARGET"
-    if run_consumer_cmds; then
+    # flip_to failure must not abort (set -e) before the FAIL issue is filed.
+    if ! flip_to "$PREVIOUS_TARGET"; then
+      note="ROLLBACK FLIP FAILED: current may still point at the failed release — manual pin state, see logs"
+    elif run_consumer_cmds; then
       note="rolled back to $(basename "$PREVIOUS_TARGET")"
     else
       note="rolled back pin to $(basename "$PREVIOUS_TARGET") BUT consumer reactivation failed — consumers may still run the failed release"
@@ -208,6 +210,19 @@ rollback_and_fail() {
   log "PROMOTION FAIL: $note"
   exit 1
 }
+
+# ── 0. Exclusive promotion lock ─────────────────────────────────────────────
+# Two concurrent promotions can flip in different orders and let the older
+# run's rollback restore a stale pin over the newer success. mkdir is atomic;
+# a held lock fails fast and the caller retries on its own cadence.
+mkdir -p "$RELEASES_ROOT"
+PROMO_LOCK="$RELEASES_ROOT/.promote.lock"
+if ! mkdir "$PROMO_LOCK" 2>/dev/null; then
+  echo "[promote] FAIL: another promotion holds $PROMO_LOCK" >&2
+  exit 1
+fi
+release_lock() { rmdir "$PROMO_LOCK" 2>/dev/null || true; }
+trap 'cleanup_boot; release_lock' EXIT
 
 # ── 1. Gate ────────────────────────────────────────────────────────────────
 cd "$REPO_ROOT"

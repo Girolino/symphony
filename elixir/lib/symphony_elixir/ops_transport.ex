@@ -41,7 +41,7 @@ defmodule SymphonyElixir.OpsTransport do
     File.mkdir_p!(logs_root)
 
     port_ref =
-      Port.open({:spawn_executable, escript_path}, [
+      Port.open({:spawn_executable, String.to_charlist(escript_path)}, [
         :binary,
         :exit_status,
         :hide,
@@ -72,20 +72,28 @@ defmodule SymphonyElixir.OpsTransport do
 
   @doc """
   Stops a daemon spawned by `spawn_daemon/4`: TERM first, KILL after 10s.
+  Returns an error when the OS process demonstrably survives both signals so
+  cleanup can fail the journey instead of leaving a daemon on the smoke port.
   """
-  @spec stop_daemon(map()) :: :ok
+  @spec stop_daemon(map()) :: :ok | {:error, :daemon_still_alive}
   def stop_daemon(%{port: port_ref, os_pid: os_pid}) do
-    System.cmd("kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    pid_string = Integer.to_string(os_pid)
+    System.cmd("kill", ["-TERM", pid_string], stderr_to_stdout: true)
 
     receive do
       {^port_ref, {:exit_status, _status}} -> :ok
     after
       10_000 ->
-        System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
-        :ok
+        System.cmd("kill", ["-KILL", pid_string], stderr_to_stdout: true)
+        Process.sleep(500)
+
+        case System.cmd("kill", ["-0", pid_string], stderr_to_stdout: true) do
+          {_out, 0} -> {:error, :daemon_still_alive}
+          {_out, _nonzero} -> :ok
+        end
     end
   catch
-    _kind, _reason -> :ok
+    _kind, _reason -> {:error, :daemon_still_alive}
   end
 
   defp graphql_with_retry(endpoint, api_key, query, variables, retries_left) do

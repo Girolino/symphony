@@ -799,4 +799,61 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
     assert [dir] = preserved
     assert File.exists?(Path.join([report_dir, dir, "symphony.log"]))
   end
+
+  test "CR-004b: a timed-out journey cancels its disposable issue" do
+    {:ok, ops} = Agent.start_link(fn -> [] end)
+
+    never_done = fn _e, _k, q, _v ->
+      cond do
+        String.contains?(q, "Team") ->
+          {:ok,
+           %{
+             "data" => %{
+               "teams" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "team-1",
+                     "key" => "SYME2E",
+                     "name" => "T",
+                     "states" => %{
+                       "nodes" => [
+                         %{"id" => "s1", "name" => "Todo", "type" => "unstarted"},
+                         %{"id" => "sX", "name" => "Canceled", "type" => "canceled"},
+                         %{"id" => "s2", "name" => "Done", "type" => "completed"}
+                       ]
+                     }
+                   }
+                 ]
+               }
+             }
+           }}
+
+        String.contains?(q, "CreateProject") ->
+          {:ok, %{"data" => %{"projectCreate" => %{"success" => true, "project" => %{"id" => "p", "name" => "n", "slugId" => "smoke-1", "url" => "u"}}}}}
+
+        String.contains?(q, "CreateIssue") ->
+          {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => %{"id" => "i", "identifier" => "SYME2E-9", "title" => "t", "url" => "u", "state" => %{"name" => "Todo"}}}}}}
+
+        String.contains?(q, "IssueState") ->
+          {:ok, %{"data" => %{"issue" => %{"id" => "i", "identifier" => "SYME2E-9", "state" => %{"name" => "Todo", "type" => "unstarted"}, "comments" => %{"nodes" => []}}}}}
+
+        String.contains?(q, "CancelIssue") ->
+          Agent.update(ops, &[:cancel_issue | &1])
+          {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+
+        String.contains?(q, "ProjectStatuses") ->
+          {:ok, %{"data" => %{"projectStatuses" => %{"nodes" => [%{"id" => "ps", "name" => "Completed", "type" => "completed"}]}}}}
+
+        String.contains?(q, "CompleteProject") ->
+          {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}
+
+        true ->
+          {:error, :unused}
+      end
+    end
+
+    assert {:error, report} = ProdSmoke.run(opts(graphql_fun: never_done, timeout_ms: 10))
+    assert report.failure =~ "await-completion"
+    assert :cancel_issue in Agent.get(ops, & &1)
+  end
 end
