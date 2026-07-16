@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fast pre-push gate: format + lint + tests. Dialyzer and coverage stay in
+# `make all` (promotion and maintenance lanes) so agent iteration stays fast.
+# This gate blocks bad artifacts, not the flow — fix and push again.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/elixir"
+
+echo "[pre-push] mix format --check-formatted"
+mise exec -- mix format --check-formatted
+
+echo "[pre-push] mix lint"
+mise exec -- mix lint
+
+echo "[pre-push] mix test"
+mise exec -- mix test
+
+echo "[pre-push] gate green"

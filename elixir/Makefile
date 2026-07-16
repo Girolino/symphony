@@ -1,12 +1,15 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e prod-smoke hooks-install
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, prod-smoke, hooks-install, ci"
 
-setup:
+setup: hooks-install
 	$(MIX) setup
+
+hooks-install:
+	git -C .. config core.hooksPath .githooks
 
 deps:
 	$(MIX) deps.get
@@ -35,6 +38,9 @@ dialyzer:
 
 e2e:
 	SYMPHONY_RUN_LIVE_E2E=1 $(MIX) test test/symphony_elixir/live_e2e_test.exs
+
+prod-smoke: build
+	$(MIX) prod.smoke
 
 ci:
 	$(MAKE) setup
