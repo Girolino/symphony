@@ -374,8 +374,10 @@ engine: it converts detected friction into queued work.
    issue.
 6. For every recurring friction found (flaky test, manual step, missing
    automation), file one deduplicated Linear issue in this project with a
-   concrete, agent-executable description (`mix ops.file_issue` or
-   `linear_graphql`).
+   concrete, agent-executable description. Prefer `mix ops.file_issue`
+   (dedupes and lands in a dispatchable state); when using `linear_graphql`
+   directly, set the issue state to `Todo` — Backlog issues are never
+   dispatched, so a Backlog finding is a parked finding.
 7. Write the optional daily digest to `qa-output/digest-<YYYY-MM-DD>.md` in
    the workspace repo copy: what shipped, what got parked and why, what was
    automated, open risks. The digest never gates anything.
