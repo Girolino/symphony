@@ -5,6 +5,8 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - Agent Review
+    - Arbiter
     - Merging
     - Rework
   terminal_states:
@@ -105,9 +107,10 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - `Backlog` -> out of scope for this workflow; do not modify.
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
-  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
+  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Agent Review`).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval.
+- `Agent Review` -> PR is attached and validated; a reviewer session judges it against REVIEW.md.
+- `Arbiter` -> a bounded-rounds deadlock; the arbiter session decides with final authority.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
@@ -121,7 +124,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait and poll for decision/review updates.
+   - `Agent Review` -> act as the reviewer per Step 3.
+   - `Arbiter` -> act as the arbiter per Step 3b.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
@@ -167,7 +171,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## PR feedback sweep protocol (required)
 
-When a ticket has an attached PR, run this protocol before moving to `Human Review`:
+When a ticket has an attached PR, run this protocol before moving to `Agent Review`:
 
 1. Identify the PR number from issue links/attachments.
 2. Gather feedback from all channels:
@@ -186,14 +190,15 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
 
 - GitHub is **not** a valid blocker by default. Always try fallback strategies first (alternate remote/auth mode, then continue publish/review flow).
-- Do not move to `Human Review` for GitHub access/auth until all fallback strategies have been attempted and documented in the workpad.
-- If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Human Review` with a short blocker brief in the workpad that includes:
+- Do not defer for GitHub access/auth until all fallback strategies have been attempted and documented in the workpad.
+- If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Deferred` with a decision packet in the workpad that includes:
   - what is missing,
   - why it blocks required acceptance/validation,
-  - exact human action needed to unblock.
-- Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
+  - the exact condition under which the maintenance lane should re-open this issue.
+- Also file the blocker as a deduplicated ops issue (`mix ops.file_issue`) so the failure is queued, not parked silently.
+- Keep the packet concise and action-oriented; do not add extra top-level comments outside the workpad.
 
-## Step 2: Execution phase (Todo -> In Progress -> Human Review)
+## Step 2: Execution phase (Todo -> In Progress -> Agent Review)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
@@ -224,28 +229,72 @@ Use this only when completion is blocked by missing required tools or missing au
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
     - Do not post any additional completion summary comment.
-11. Before moving to `Human Review`, poll PR feedback and checks:
+11. Before moving to `Agent Review`, poll PR feedback and checks:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen UI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
     - Confirm PR checks are passing (green) after the latest changes.
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
-12. Only then move issue to `Human Review`.
-    - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
+12. Only then move issue to `Agent Review`.
+    - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Deferred` with the decision packet and ops issue.
 13. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
-    - Then move to `Human Review`.
+    - Then move to `Agent Review`.
 
-## Step 3: Human Review and merge handling
+## Step 3: Agent Review (reviewer role — REVIEW.md is the rulebook)
 
-1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
-3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
-6. After merge is complete, move the issue to `Done`.
+When the issue is in `Agent Review`, this session is the REVIEWER, not the
+implementer. Reviewer sessions never edit implementation code.
+
+1. Read `REVIEW.md` at the repo root: it is the complete review rulebook.
+2. Read the PR diff, the workpad, and the issue history. Count prior review
+   rounds from the workpad `### Review Rounds` section (create it if absent).
+3. Judge the diff strictly against REVIEW.md rules and the workpad acceptance
+   criteria. Run the fast checks yourself when in doubt (`mix format
+   --check-formatted && mix lint && mix test` in the PR workspace).
+4. Verdict — exactly one of:
+   - **Approve**: every material rule holds. Record `Round N: APPROVED` in the
+     workpad, then move the issue to `Merging`.
+   - **Request changes**: post ONE review comment on the PR listing each
+     violation as `RV-xx: <file:line> — <observed violation>`. A rejection
+     reason not covered by any rule MUST include a proposed rule addition for
+     `REVIEW.md` in the same comment (no-rejection-without-a-rule). Record
+     `Round N: CHANGES (rules cited)` in the workpad and move the issue to
+     `In Progress`.
+5. Bounded rounds: if this would be round 4 or later and the same finding is
+   still disputed (implementer pushed back with evidence and the reviewer
+   still disagrees), do NOT loop again — record `Round N: DEADLOCK` with both
+   positions summarized and move the issue to `Arbiter`.
+6. Reviewer verdicts carry evidence (rule id + file/line or command output),
+   never taste (REVIEW.md RV-P2).
+
+## Step 3b: Arbiter (final authority — no human escalation exists)
+
+When the issue is in `Arbiter`, this session is the ARBITER. Its decision is
+FINAL; there is no appeal and no human escalation path.
+
+1. Read REVIEW.md, the workpad `### Review Rounds` history, the disputed
+   findings, and both positions. Run any command needed to verify claims.
+2. Decide, and record `Arbiter: <decision> — <one-paragraph rationale>` in the
+   workpad. Exactly one of:
+   - **Accept the implementation**: move the issue to `Merging`.
+   - **Uphold the review**: write binding, concrete change instructions in
+     the workpad and move the issue to `In Progress`. The implementer follows
+     them without relitigating.
+   - **Defer**: neither position is safe to adopt now. Write a decision
+     packet (what was tried, both positions, re-open condition) and move the
+     issue to `Deferred`. The maintenance lane re-opens it when the condition
+     changes.
+3. If the dispute exposed a defective REVIEW.md rule, file a rule-revision
+   issue (`mix ops.file_issue`) — rules are amended through normal PRs, never
+   inline.
+
+## Step 3c: Merging
+
+1. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
+2. After merge is complete, move the issue to `Done`.
 
 ## Step 4: Rework handling
 
@@ -259,7 +308,7 @@ Use this only when completion is blocked by missing required tools or missing au
    - Create a new bootstrap `## Codex Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
 
-## Completion bar before Human Review
+## Completion bar before Agent Review
 
 - Step 1/2 checklist is fully complete and accurately reflected in the single workpad comment.
 - Acceptance criteria and required ticket-provided validation items are complete.
@@ -283,8 +332,8 @@ Use this only when completion is blocked by missing required tools or missing au
   title/description/acceptance criteria, same-project assignment, a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on the
   current issue.
-- Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
-- In `Human Review`, do not make changes; wait and poll.
+- Do not move to `Agent Review` unless the `Completion bar before Agent Review` is satisfied.
+- In `Agent Review` and `Arbiter`, act only in the role those states define; reviewer/arbiter sessions never edit implementation code.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.
