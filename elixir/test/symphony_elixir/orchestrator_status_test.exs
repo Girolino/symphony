@@ -101,6 +101,75 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator coalesces published snapshots for bursty codex notifications" do
+    issue_id = "issue-coalesced-snapshot"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-189",
+      title: "Coalesced snapshot test",
+      description: "Bound dashboard publication pressure",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-189"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :CoalescedSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    notification = fn sequence ->
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/agentMessage/delta",
+          "params" => %{"sequence" => sequence}
+        },
+        timestamp: DateTime.utc_now()
+      }
+    end
+
+    send(pid, {:codex_worker_update, issue_id, notification.(1)})
+    first_token = :sys.get_state(pid).codex_snapshot_publish_token
+    assert is_reference(first_token)
+
+    send(pid, {:codex_worker_update, issue_id, notification.(2)})
+    assert :sys.get_state(pid).codex_snapshot_publish_token == first_token
+
+    Process.sleep(300)
+    assert :sys.get_state(pid).codex_snapshot_publish_token == nil
+
+    assert {:ok, %{running: [snapshot_entry]}} =
+             SymphonyElixir.OrchestratorSnapshotStore.fetch(orchestrator_name)
+
+    assert get_in(snapshot_entry, [:last_codex_message, :message, "params", "sequence"]) == 2
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 

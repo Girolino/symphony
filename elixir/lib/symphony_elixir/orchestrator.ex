@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @codex_snapshot_publish_interval_ms 250
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 100
   @empty_codex_totals %{
@@ -43,6 +44,7 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :codex_snapshot_publish_token,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -186,12 +188,24 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_rate_limits(update)
 
         state = %{state | running: Map.put(running, issue_id, updated_running_entry)}
-        publish_and_notify(state)
+        state = publish_or_schedule_codex_snapshot(state, update)
         {:noreply, state}
     end
   end
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:publish_codex_snapshot, token},
+        %{codex_snapshot_publish_token: token} = state
+      )
+      when is_reference(token) do
+    state = %{state | codex_snapshot_publish_token: nil}
+    publish_and_notify(state)
+    {:noreply, state}
+  end
+
+  def handle_info({:publish_codex_snapshot, _token}, state), do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
@@ -1474,6 +1488,29 @@ defmodule SymphonyElixir.Orchestrator do
     notify_dashboard()
     :ok
   end
+
+  defp publish_or_schedule_codex_snapshot(%State{} = state, update) do
+    if immediate_codex_snapshot?(update) do
+      publish_and_notify(state)
+      state
+    else
+      schedule_codex_snapshot(state)
+    end
+  end
+
+  defp schedule_codex_snapshot(%State{codex_snapshot_publish_token: nil} = state) do
+    token = make_ref()
+    Process.send_after(self(), {:publish_codex_snapshot, token}, @codex_snapshot_publish_interval_ms)
+    %{state | codex_snapshot_publish_token: token}
+  end
+
+  defp schedule_codex_snapshot(%State{} = state), do: state
+
+  defp immediate_codex_snapshot?(%{event: :notification} = update) do
+    codex_message_method(Map.get(update, :payload)) == "mcpServer/elicitation/request"
+  end
+
+  defp immediate_codex_snapshot?(%{event: _event}), do: true
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil
