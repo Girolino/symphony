@@ -50,6 +50,8 @@ cleanup_boot() {
   fi
   BOOT_PID=""
   if [ -n "$BOOT_TMP" ]; then
+    # The escript may survive a TERM to the mise wrapper; kill by workflow path.
+    pkill -f "$BOOT_TMP/WORKFLOW.md" 2>/dev/null || true
     rm -rf "$BOOT_TMP"
     BOOT_TMP=""
   fi
@@ -114,9 +116,12 @@ EOF
   sed -i '' "s|BOOT_WORKSPACES|$BOOT_TMP/workspaces|" "$BOOT_TMP/WORKFLOW.md"
 
   log "boot check on port $BOOT_PORT"
-  "$release_dir/elixir/bin/symphony" \
+  (cd "$release_dir/elixir" && mise trust --quiet 2>/dev/null || true)
+  # The escript shebang needs mise-managed erlang on PATH; run from the
+  # release's elixir dir so its mise.toml provides the right toolchain.
+  (cd "$release_dir/elixir" && exec mise exec -- ./bin/symphony \
     --i-understand-that-this-will-be-running-without-the-usual-guardrails \
-    "$BOOT_TMP/WORKFLOW.md" --logs-root "$BOOT_TMP/logs" --port "$BOOT_PORT" &
+    "$BOOT_TMP/WORKFLOW.md" --logs-root "$BOOT_TMP/logs" --port "$BOOT_PORT") &
   BOOT_PID=$!
 
   local deadline=$((SECONDS + 30))
