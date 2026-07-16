@@ -101,20 +101,24 @@ defmodule SymphonyElixir.OpsIssue do
     bootstrap_path = Keyword.get(opts, :bootstrap_path, ProdSmoke.default_bootstrap_path())
 
     with {:ok, api_key} <- ProdSmoke.resolve_api_key(get_env, bootstrap_path),
-         {:existing, nil} <- {:existing, find_existing(graphql_fun, api_key, team_key, title)},
+         {:ok, nil} <- find_existing(graphql_fun, api_key, team_key, title),
          {:ok, team_id} <- fetch_team_id(graphql_fun, api_key, team_key) do
       project_id = resolve_project_id(graphql_fun, api_key, project_slug)
       create_issue(graphql_fun, api_key, team_id, project_id, title, body)
     else
-      {:existing, %{} = issue} -> {:existing, issue}
+      {:ok, %{} = issue} -> {:existing, issue}
       {:error, reason} -> {:error, reason}
     end
   end
 
+  # A failed dedup lookup must NOT be read as "no issue exists" — creating on
+  # top of a transient error would break the exactly-one-open-issue guarantee.
   defp find_existing(graphql_fun, api_key, team_key, title) do
     case graphql_fun.(@linear_endpoint, api_key, @find_issue_query, %{teamKey: team_key, title: title}) do
-      {:ok, %{"data" => %{"issues" => %{"nodes" => [issue | _]}}}} -> issue
-      _ -> nil
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [issue | _]}}}} -> {:ok, issue}
+      {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}} -> {:ok, nil}
+      {:ok, payload} -> {:error, {:dedup_lookup_failed, inspect(payload, limit: 5)}}
+      {:error, reason} -> {:error, {:dedup_lookup_failed, reason}}
     end
   end
 

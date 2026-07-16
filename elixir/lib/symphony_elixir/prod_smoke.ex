@@ -437,20 +437,27 @@ defmodule SymphonyElixir.ProdSmoke do
     continue_or_halt(state, status)
   end
 
+  # Accumulates each created resource into `linear` as soon as it exists, so a
+  # later setup failure still hands the partial state to cleanup (a project
+  # whose issue creation failed must still be completed, not orphaned).
   defp step_linear_setup(state, context) do
     {status, detail, elapsed, linear} =
       timed(fn ->
-        with {:ok, team} <- fetch_team(context, state.api_key),
-             {:ok, project} <- create_project(context, state.api_key, team),
-             {:ok, issue} <- create_issue(context, state.api_key, team, project) do
+        with {:team, {:ok, team}, acc} <- {:team, fetch_team(context, state.api_key), %{}},
+             acc = Map.put(acc, :team, team),
+             {:project, {:ok, project}, acc} <- {:project, create_project(context, state.api_key, team), acc},
+             acc = Map.put(acc, :project, project),
+             {:issue, {:ok, issue}, acc} <- {:issue, create_issue(context, state.api_key, team, project), acc} do
           marker = "Symphony prod smoke #{issue["identifier"]} #{project["slugId"]}"
-
-          {:pass, "disposable issue #{issue["identifier"]} created", %{team: team, project: project, issue: issue, marker: marker}}
+          acc = acc |> Map.put(:issue, issue) |> Map.put(:marker, marker)
+          {:pass, "disposable issue #{issue["identifier"]} created", acc}
         else
-          {:error, reason} -> {:fail, "linear setup failed: #{inspect(reason)}", nil}
+          {stage, {:error, reason}, acc} ->
+            {:fail, "linear setup failed at #{stage}: #{inspect(reason)}", acc}
         end
       end)
 
+    linear = if linear == %{}, do: nil, else: linear
     state = %{record_step(state, "linear-setup", status, elapsed, detail) | linear: linear}
 
     state =
@@ -581,13 +588,33 @@ defmodule SymphonyElixir.ProdSmoke do
         logs_result = preserve_logs_on_failure(steps, context)
         fs_result = safe(fn -> File.rm_rf!(context.smoke_root) end)
 
-        {:pass,
+        # A leaked daemon or open disposable project must fail the journey —
+        # a promotion cannot be declared live over an unfinished cleanup.
+        # Log preservation is diagnostic-only and never fails the run.
+        cleanup_status =
+          if cleanup_ok?(:daemon, daemon_result) and cleanup_ok?(:project, project_result) and
+               cleanup_ok?(:fs, fs_result) do
+            :pass
+          else
+            :fail
+          end
+
+        {cleanup_status,
          "daemon=#{inspect(daemon_result)} project=#{inspect(project_result)} " <>
            "logs=#{inspect(logs_result)} fs=#{inspect(fs_result)}", nil}
       end)
 
     [step("cleanup", status, elapsed, detail) | steps]
   end
+
+  defp cleanup_ok?(_kind, :skipped), do: true
+  defp cleanup_ok?(:daemon, :ok), do: true
+
+  defp cleanup_ok?(:project, {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}), do: true
+
+  defp cleanup_ok?(:fs, {paths, []}) when is_list(paths), do: true
+  defp cleanup_ok?(:fs, paths) when is_list(paths), do: true
+  defp cleanup_ok?(_kind, _result), do: false
 
   # A FAIL report without the daemon's own logs cannot be triaged by an agent,
   # so failed journeys keep their logs under the report directory.
@@ -773,7 +800,9 @@ defmodule SymphonyElixir.ProdSmoke do
     _kind, reason -> {:caught, reason}
   end
 
-  defp completed?(%{"state" => %{"type" => type}}), do: type in ["completed", "canceled"]
+  # Only a genuinely completed state proves the journey; a canceled issue with
+  # the marker comment must NOT pass the smoke.
+  defp completed?(%{"state" => %{"type" => "completed"}}), do: true
   defp completed?(_issue), do: false
 
   defp has_comment?(%{"comments" => %{"nodes" => nodes}}, marker) when is_list(nodes) do

@@ -62,7 +62,11 @@ cleanup_boot() {
 }
 trap cleanup_boot EXIT
 
+# Returns non-zero when any consumer command fails: a release is not live
+# until every consumer activated it, and a failed rollback activation must
+# surface as a promotion failure rather than a log line.
 run_consumer_cmds() {
+  local failures=0
   if [ -z "$CONSUMER_CMDS" ]; then
     log "no consumer control commands configured"
     return 0
@@ -71,9 +75,11 @@ run_consumer_cmds() {
     [ -z "$cmd" ] && continue
     log "consumer: $cmd"
     if ! bash -lc "$cmd"; then
-      log "consumer command failed (continuing): $cmd"
+      log "consumer command FAILED: $cmd"
+      failures=$((failures + 1))
     fi
   done <<< "$CONSUMER_CMDS"
+  [ "$failures" -eq 0 ]
 }
 
 file_fail_issue() {
@@ -83,8 +89,12 @@ file_fail_issue() {
     log "WARNING: could not file the FAIL issue; report kept at $body_file"
 }
 
+# Reports are scoped per promotion run so a FAIL issue can never attach a
+# stale report from an earlier invocation.
+PROMO_REPORT_DIR=""
+
 latest_report() {
-  ls -t "$REPO_ROOT/qa-output"/prod-smoke-*.json 2>/dev/null | head -1
+  ls -t "$PROMO_REPORT_DIR"/prod-smoke-*.json 2>/dev/null | head -1
 }
 
 flip_to() {
@@ -128,6 +138,14 @@ EOF
   mkdir -p "$BOOT_TMP/workspaces"
   sed -i '' "s|BOOT_WORKSPACES|$BOOT_TMP/workspaces|" "$BOOT_TMP/WORKFLOW.md"
 
+  # The health probe must be answered by OUR spawned process — an unrelated
+  # daemon already on the port would greenlight an untested release.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$BOOT_PORT") 2>/dev/null; then
+    log "boot check FAILED: port $BOOT_PORT is already in use"
+    cleanup_boot
+    return 1
+  fi
+
   log "boot check on port $BOOT_PORT"
   (cd "$release_dir/elixir" && mise trust --quiet 2>/dev/null || true)
   # The escript shebang needs mise-managed erlang on PATH; run from the
@@ -140,6 +158,12 @@ EOF
   local deadline=$((SECONDS + 30))
   local state_body
   while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! kill -0 "$BOOT_PID" 2>/dev/null; then
+      log "boot check FAILED: release process exited before becoming healthy"
+      cleanup_boot
+      return 1
+    fi
+
     # No pipeline here: under pipefail an early-exiting grep SIGPIPEs curl and
     # kills the whole promotion (observed as exit 141).
     state_body="$(curl -sf -m 2 "http://127.0.0.1:$BOOT_PORT/api/v1/state" || true)"
@@ -156,10 +180,49 @@ EOF
   return 1
 }
 
+# Single failure path after the flip: restore the previous pin, reactivate
+# consumers on it, and always leave a deduplicated FAIL issue behind.
+rollback_and_fail() {
+  local reason="$1"
+  log "$reason; rolling back"
+  local note
+  if [ -n "$PREVIOUS_TARGET" ]; then
+    flip_to "$PREVIOUS_TARGET"
+    if run_consumer_cmds; then
+      note="rolled back to $(basename "$PREVIOUS_TARGET")"
+    else
+      note="rolled back pin to $(basename "$PREVIOUS_TARGET") BUT consumer reactivation failed — consumers may still run the failed release"
+    fi
+  else
+    note="no previous release existed; current left on $SHORT_SHA (bootstrap promotion)"
+    log "$note"
+  fi
+
+  local report body_file
+  report="$(latest_report || true)"
+  body_file="${report:-$(mktemp)}"
+  if [ -z "${report:-}" ]; then
+    echo "promotion failed for $SHA: $reason. $note" > "$body_file"
+  fi
+  file_fail_issue "promote FAIL: $reason on $SHORT_SHA" "$body_file"
+  log "PROMOTION FAIL: $note"
+  exit 1
+}
+
 # ── 1. Gate ────────────────────────────────────────────────────────────────
 cd "$REPO_ROOT"
 SHA="$(git rev-parse HEAD)"
 SHORT_SHA="$(git rev-parse --short HEAD)"
+PROMO_REPORT_DIR="$REPO_ROOT/qa-output/promote-$SHORT_SHA-$$"
+mkdir -p "$PROMO_REPORT_DIR"
+
+# The gate runs in the working tree while the release builds from the HEAD
+# commit; tracked local modifications would let the gate validate code that
+# is not in the artifact being promoted.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  log "FAIL: tracked working-tree changes present; commit or stash before promoting"
+  exit 1
+fi
 
 if [ "$SKIP_GATE" -eq 1 ]; then
   log "gate skipped by flag"
@@ -209,7 +272,9 @@ if [ -L "$CURRENT_LINK" ]; then
   PREVIOUS_TARGET="$(readlink "$CURRENT_LINK")"
 fi
 flip_to "$RELEASE_DIR"
-run_consumer_cmds
+if ! run_consumer_cmds; then
+  rollback_and_fail "consumer activation failed"
+fi
 
 # ── 6. Real production smoke; rollback on failure ──────────────────────────
 if [ "$SKIP_SMOKE" -eq 1 ]; then
@@ -218,26 +283,11 @@ if [ "$SKIP_SMOKE" -eq 1 ]; then
 fi
 
 log "running prod smoke against release $SHORT_SHA"
-if (cd "$ELIXIR_DIR" && mise exec -- mix prod.smoke --escript-path "$RELEASE_DIR/elixir/bin/symphony"); then
+if (cd "$ELIXIR_DIR" && mise exec -- mix prod.smoke \
+  --escript-path "$RELEASE_DIR/elixir/bin/symphony" \
+  --report-dir "$PROMO_REPORT_DIR"); then
   log "PROMOTION PASS: $SHORT_SHA is live"
   exit 0
 fi
 
-log "smoke FAILED; rolling back"
-if [ -n "$PREVIOUS_TARGET" ]; then
-  flip_to "$PREVIOUS_TARGET"
-  run_consumer_cmds
-  ROLLBACK_NOTE="rolled back to $(basename "$PREVIOUS_TARGET")"
-else
-  ROLLBACK_NOTE="no previous release existed; current left on $SHORT_SHA (bootstrap promotion)"
-  log "$ROLLBACK_NOTE"
-fi
-
-REPORT="$(latest_report || true)"
-BODY_FILE="${REPORT:-$(mktemp)}"
-if [ -z "${REPORT:-}" ]; then
-  echo "prod smoke failed for $SHA but no report file was found. $ROLLBACK_NOTE" > "$BODY_FILE"
-fi
-file_fail_issue "promote FAIL: smoke failed on $SHORT_SHA" "$BODY_FILE"
-log "PROMOTION FAIL: $ROLLBACK_NOTE"
-exit 1
+rollback_and_fail "smoke failed"

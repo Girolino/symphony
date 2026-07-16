@@ -146,4 +146,19 @@ defmodule SymphonyElixir.OpsIssueTest do
     opts = [graphql_fun: create_error, get_env: fn "LINEAR_API_KEY" -> "k" end]
     assert {:error, {:linear_api_status, 500}} = OpsIssue.file("t", "b", opts)
   end
+
+  test "CR-001: a failed dedup lookup aborts filing instead of duplicating" do
+    lookup_down = fn _e, _k, query, _v ->
+      if String.contains?(query, "SymphonyOpsFindIssue") do
+        {:error, :timeout}
+      else
+        send(self(), {:unexpected_call, query})
+        {:error, :should_not_be_called}
+      end
+    end
+
+    opts = [graphql_fun: lookup_down, get_env: fn "LINEAR_API_KEY" -> "k" end]
+    assert {:error, {:dedup_lookup_failed, :timeout}} = OpsIssue.file("promote FAIL", "b", opts)
+    refute_received {:unexpected_call, _}
+  end
 end

@@ -28,13 +28,12 @@ defmodule SymphonyElixir.ProdSmokeTest do
     test "falls back to the bootstrap file" do
       dir = Path.join(System.tmp_dir!(), "prod-smoke-test-#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
       path = Path.join(dir, "env")
       File.write!(path, "LINEAR_API_KEY=from-file\n")
 
       get_env = fn "LINEAR_API_KEY" -> nil end
       assert {:ok, "from-file"} = ProdSmoke.resolve_api_key(get_env, path)
-    after
-      File.rm_rf(Path.dirname(Path.join(System.tmp_dir!(), "unused")))
     end
 
     test "errors by name only when the capability is absent" do
@@ -648,6 +647,12 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
                }}
           end
 
+        String.contains?(q, "ProjectStatuses") ->
+          {:ok, %{"data" => %{"projectStatuses" => %{"nodes" => [%{"id" => "ps", "name" => "Completed", "type" => "completed"}]}}}}
+
+        String.contains?(q, "CompleteProject") ->
+          {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}
+
         true ->
           {:ok, %{"data" => %{}}}
       end
@@ -655,5 +660,117 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
 
     assert {:ok, report} = ProdSmoke.run(opts(graphql_fun: weird, timeout_ms: 5_000))
     assert report.result == :pass
+  end
+
+  test "CR-002: completes the disposable project when issue creation fails" do
+    {:ok, ops} = Agent.start_link(fn -> [] end)
+
+    graphql = fn _e, _k, q, _v ->
+      cond do
+        String.contains?(q, "Team") ->
+          team_ok()
+
+        String.contains?(q, "CreateProject") ->
+          {:ok, %{"data" => %{"projectCreate" => %{"success" => true, "project" => %{"id" => "p1", "name" => "n", "slugId" => "s", "url" => "u"}}}}}
+
+        String.contains?(q, "CreateIssue") ->
+          {:error, {:linear_api_status, 500}}
+
+        String.contains?(q, "ProjectStatuses") ->
+          Agent.update(ops, &[:statuses | &1])
+          {:ok, %{"data" => %{"projectStatuses" => %{"nodes" => [%{"id" => "ps", "name" => "Completed", "type" => "completed"}]}}}}
+
+        String.contains?(q, "CompleteProject") ->
+          Agent.update(ops, &[:complete_project | &1])
+          {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}
+
+        true ->
+          {:error, :unused}
+      end
+    end
+
+    assert {:error, report} = ProdSmoke.run(opts(graphql_fun: graphql))
+    assert report.failure =~ "issue"
+    assert :complete_project in Agent.get(ops, & &1)
+  end
+
+  test "CR-003: a failed daemon stop fails an otherwise successful journey" do
+    {:ok, polls} = Agent.start_link(fn -> 0 end)
+
+    happy = fn _e, _k, q, _v ->
+      cond do
+        String.contains?(q, "Team") ->
+          team_ok()
+
+        String.contains?(q, "CreateProject") ->
+          {:ok, %{"data" => %{"projectCreate" => %{"success" => true, "project" => %{"id" => "p", "name" => "n", "slugId" => "smoke-1", "url" => "u"}}}}}
+
+        String.contains?(q, "CreateIssue") ->
+          {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => %{"id" => "i", "identifier" => "SYME2E-9", "title" => "t", "url" => "u", "state" => %{"name" => "Todo"}}}}}}
+
+        String.contains?(q, "IssueState") ->
+          Agent.update(polls, &(&1 + 1))
+
+          {:ok,
+           %{
+             "data" => %{
+               "issue" => %{
+                 "id" => "i",
+                 "identifier" => "SYME2E-9",
+                 "state" => %{"name" => "Done", "type" => "completed"},
+                 "comments" => %{"nodes" => [%{"body" => "Symphony prod smoke SYME2E-9 smoke-1"}]}
+               }
+             }
+           }}
+
+        String.contains?(q, "ProjectStatuses") ->
+          {:ok, %{"data" => %{"projectStatuses" => %{"nodes" => [%{"id" => "ps", "name" => "Completed", "type" => "completed"}]}}}}
+
+        String.contains?(q, "CompleteProject") ->
+          {:ok, %{"data" => %{"projectUpdate" => %{"success" => true}}}}
+
+        true ->
+          {:error, :unused}
+      end
+    end
+
+    assert {:error, report} =
+             ProdSmoke.run(opts(graphql_fun: happy, stop_fun: fn _ -> {:error, :stuck} end))
+
+    assert report.failure =~ "cleanup"
+  end
+
+  test "CR-004: a canceled issue with the marker does not pass the smoke" do
+    canceled = fn _e, _k, q, _v ->
+      cond do
+        String.contains?(q, "Team") ->
+          team_ok()
+
+        String.contains?(q, "CreateProject") ->
+          {:ok, %{"data" => %{"projectCreate" => %{"success" => true, "project" => %{"id" => "p", "name" => "n", "slugId" => "smoke-1", "url" => "u"}}}}}
+
+        String.contains?(q, "CreateIssue") ->
+          {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => %{"id" => "i", "identifier" => "SYME2E-9", "title" => "t", "url" => "u", "state" => %{"name" => "Todo"}}}}}}
+
+        String.contains?(q, "IssueState") ->
+          {:ok,
+           %{
+             "data" => %{
+               "issue" => %{
+                 "id" => "i",
+                 "identifier" => "SYME2E-9",
+                 "state" => %{"name" => "Canceled", "type" => "canceled"},
+                 "comments" => %{"nodes" => [%{"body" => "Symphony prod smoke SYME2E-9 smoke-1"}]}
+               }
+             }
+           }}
+
+        true ->
+          {:ok, %{"data" => %{}}}
+      end
+    end
+
+    assert {:error, report} = ProdSmoke.run(opts(graphql_fun: canceled, timeout_ms: 20))
+    assert report.failure =~ "await-completion"
   end
 end
