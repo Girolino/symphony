@@ -2117,6 +2117,27 @@ Use the same validation profiles as Section 17:
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
 
+### 18.4 Autonomy Extension Profile (OPTIONAL, implemented by this fork)
+
+An implementation MAY layer an autonomy profile on top of the conformance
+checklist. The reference implementation in this repository ships:
+
+- `mix prod.smoke` — a real tracker + real agent smoke journey against the
+  compiled escript, with machine-readable PASS/FAIL reports and guaranteed
+  cleanup of disposable tracker resources.
+- `scripts/promote.sh` — blue-green promotion of a versioned release with a
+  memory-tracker boot check, verified atomic `current`-symlink flip, the real
+  smoke as the acceptance gate, automatic rollback, and a deduplicated
+  operational tracker issue on every failure.
+- Liveness bounds (Section 7 extension): optional `agent.blocked_max_age_ms`
+  re-enters over-age blocked issues into the retry path, and optional
+  `agent.max_consecutive_failures` parks a repeatedly failing issue (never the
+  daemon) while filing an operational issue; parked issues are reconciled and
+  released when the tracker reaches a terminal state.
+- A constitution boundary (`CONSTITUTION.md` + `mix constitution.check`)
+  preventing agent lanes from modifying the promotion, rollback, and hook
+  machinery that constrains them.
+
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 
 This appendix describes a common extension profile in which Symphony keeps one central

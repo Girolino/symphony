@@ -32,6 +32,22 @@ When working inside `elixir/`, also follow `elixir/AGENTS.md`; it is more specif
 - For Alpine Reach, the target repo is `/Users/fernandomaluf/Dropbox/dr-thomas`. Its workflow contract is `/Users/fernandomaluf/Dropbox/dr-thomas/WORKFLOW.md`.
 - The harness may expose primitives for scheduling, workspace isolation, app-server sessions, observability, retries, and hooks. The target repo decides Linear states, workpad format, branch policy, release gates, browser locks, and product validation rules.
 
+## Autonomy Stack (this fork)
+
+This fork operates a self-maintaining lane with zero human escalation. The
+governing files, all at the repo root unless noted:
+
+- `CONSTITUTION.md` — immutable boundary; enforced by `mix constitution.check` in the lint gate.
+- `REVIEW.md` — encoded review rules; the Agent Review lane judges PRs against it.
+- `elixir/WORKFLOW.md` — the lane contract: implementer, Agent Review, Arbiter (final authority), Merging (auto-land), Deferred, and the upkeep flow.
+- `scripts/promote.sh` — the only way the release pin moves: gate, boot check, verified atomic flip, real prod smoke, auto-rollback, FAIL issue.
+- `scripts/auto-promote.sh` — promotes when `origin/main` is ahead of the pin (30-minute launchd timer, dedicated clone).
+- `scripts/upkeep-heartbeat.sh`, `scripts/lane-daemon.sh`, `scripts/lane-watchdog.sh`, `scripts/credential-probe.sh` — recurring maintenance, the KeepAlive lane daemon, zombie detection, and credential validity, each filing deduplicated ops issues on failure (`mix ops.file_issue`).
+- Install: `scripts/install-lane.sh` and `scripts/install-upkeep-scheduler.sh` render and bootstrap the launchd jobs.
+
+Every automated FAIL terminates in a Linear issue in the SYM team; a failure
+that only reaches a log is a constitution violation.
+
 ## Local Operating Model
 
 The agreed multi-repo model is one daemon per repo/workflow, isolated by:
