@@ -261,7 +261,9 @@ defmodule SymphonyElixir.ProdSmoke do
         git config user.email "symphony-prod-smoke@example.invalid"
         printf '%s\\n' "Symphony prod smoke workspace" > README.md
         git add README.md
-        git commit -q -m "Initialize prod smoke workspace"
+        git -c commit.gpgSign=false \
+          -c core.hooksPath=.git/symphony-prod-smoke-no-hooks \
+          commit --no-verify -q -m "Initialize prod smoke workspace"
     agent:
       max_concurrent_agents: 1
       max_turns: 3
