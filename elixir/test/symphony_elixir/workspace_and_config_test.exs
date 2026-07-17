@@ -789,7 +789,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [canonical_default_workspace_root],
+             "writableRoots" => [
+               canonical_default_workspace_root,
+               Path.join(canonical_default_workspace_root, ".git")
+             ],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1080,6 +1083,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
     explicit_policy = %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/explicit"]}
+    default_workspace_root = Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
 
     assert Schema.resolve_turn_sandbox_policy(%Schema{
              codex: %Codex{turn_sandbox_policy: explicit_policy},
@@ -1091,7 +1095,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              workspace: %Schema.Workspace{root: ""}
            }) == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))],
+             "writableRoots" => [
+               default_workspace_root,
+               Path.join(default_workspace_root, ".git")
+             ],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1106,7 +1113,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "/tmp/workspace"
            ) == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand("/tmp/workspace")],
+             "writableRoots" => [
+               Path.expand("/tmp/workspace"),
+               Path.join(Path.expand("/tmp/workspace"), ".git")
+             ],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1125,7 +1135,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Schema.resolve_turn_sandbox_policy(settings) == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand("~/.symphony-workspaces")],
+             "writableRoots" => [
+               Path.expand("~/.symphony-workspaces"),
+               Path.join(Path.expand("~/.symphony-workspaces"), ".git")
+             ],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1137,7 +1150,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert remote_policy == %{
              "type" => "workspaceWrite",
-             "writableRoots" => ["~/.symphony-workspaces"],
+             "writableRoots" => [
+               "~/.symphony-workspaces",
+               Path.join("~/.symphony-workspaces", ".git")
+             ],
              "readOnlyAccess" => %{"type" => "fullAccess"},
              "networkAccess" => false,
              "excludeTmpdirEnvVar" => false,
@@ -1145,7 +1161,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
-  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
+  test "runtime sandbox policy resolution completes minimal workspace write policies" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1173,6 +1189,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "writableRoots" => ["relative/path"],
                "networkAccess" => true
              }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "networkAccess" => true,
+               "writableRoots" => [
+                 canonical_issue_workspace,
+                 Path.join(canonical_issue_workspace, ".git")
+               ]
+             }
+
+      settings = Config.settings!()
+
+      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}} =
+               Schema.resolve_runtime_turn_sandbox_policy(settings, 123)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -1224,7 +1267,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, default_policy} = Schema.resolve_runtime_turn_sandbox_policy(settings)
       assert default_policy["type"] == "workspaceWrite"
-      assert default_policy["writableRoots"] == [canonical_workspace_root]
+
+      assert default_policy["writableRoots"] == [
+               canonical_workspace_root,
+               Path.join(canonical_workspace_root, ".git")
+             ]
+
+      assert default_policy["readOnlyAccess"] == %{"type" => "fullAccess"}
 
       assert {:ok, blank_workspace_policy} =
                Schema.resolve_runtime_turn_sandbox_policy(settings, "")
