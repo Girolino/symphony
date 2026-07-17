@@ -205,9 +205,11 @@ When a ticket has an attached PR, run this protocol before moving to `Agent Revi
    - Top-level PR comments (`gh pr view --comments`).
    - Inline review comments (`gh api repos/<owner>/<repo>/pulls/<pr>/comments`).
    - Review summaries/states (`gh pr view --json reviews`).
-3. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
-   - code/test/docs updated to address it, or
-   - explicit, justified pushback reply is posted on that thread.
+3. Classify each actionable reviewer comment, then apply the matching bar:
+   - **Human comments and comments citing a REVIEW.md rule id are BLOCKING** until one of these is true:
+     - code/test/docs updated to address it, or
+     - explicit, justified pushback reply is posted on that thread.
+   - **Bot comments that do not cite a REVIEW.md rule (e.g. CodeRabbit nitpicks) are ADVISORY, not blocking.** Apply them when they are clearly correct and cheap; otherwise note the decision in the workpad and proceed. A bot's stylistic or speculative comment must never block a landing on its own (mirrors REVIEW.md RV-P2 / no-rejection-without-a-rule).
 4. Update the workpad plan/checklist to include each feedback item and its resolution status.
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.

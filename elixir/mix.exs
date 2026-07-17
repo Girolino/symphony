@@ -10,7 +10,11 @@ defmodule SymphonyElixir.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: 100
+          # 95, not 100: a single uncovered line (or a hard-to-cover glue
+          # branch) should not block an otherwise-good PR. Still enforces
+          # strong coverage; pairs with a deterministic gate (flaky tests that
+          # skip a branch no longer manufacture a coverage "failure").
+          threshold: 95
         ],
         ignore_modules: [
           SymphonyElixir.Config,

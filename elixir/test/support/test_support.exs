@@ -55,6 +55,11 @@ defmodule SymphonyElixir.TestSupport do
 
   def write_workflow_file!(path, overrides \\ []) do
     workflow = workflow_content(overrides)
+    # The workflow path is global (Application env); a prior test may have left
+    # it pointing at a temp dir it has since removed. Recreate the dir so a
+    # stale global path degrades into a valid write instead of a flaky
+    # File.Error — kills a whole class of test-isolation flakes at the source.
+    File.mkdir_p!(Path.dirname(path))
     File.write!(path, workflow)
 
     if Process.whereis(SymphonyElixir.WorkflowStore) do
