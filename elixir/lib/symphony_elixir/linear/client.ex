@@ -165,23 +165,75 @@ defmodule SymphonyElixir.Linear.Client do
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+    sleep_fun = Keyword.get(opts, :sleep_fun, &Process.sleep/1)
 
+    do_graphql(payload, request_fun, sleep_fun, 0)
+  end
+
+  # A single Linear API key is shared by every daemon; the combined load hits
+  # Linear's rate limit, which returns RATELIMITED. Treating it as a hard error
+  # makes polling/reconciliation fail spuriously. Back off and retry a bounded
+  # number of times so transient throttling degrades gracefully instead of
+  # failing the operation.
+  @rate_limit_max_retries 4
+  @rate_limit_base_backoff_ms 2_000
+
+  defp do_graphql(payload, request_fun, sleep_fun, attempt) do
     with {:ok, headers} <- graphql_headers(),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
+      if rate_limited_body?(body) and attempt < @rate_limit_max_retries do
+        backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+      else
+        {:ok, body}
+      end
     else
-      {:ok, response} ->
-        Logger.error(
-          "Linear GraphQL request failed status=#{response.status}" <>
-            linear_error_context(payload, response)
-        )
+      {:ok, %{status: status} = response} when status in [429] ->
+        maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
 
-        {:error, {:linear_api_status, response.status}}
+      {:ok, %{status: 400} = response} ->
+        if rate_limited_body?(response.body) and attempt < @rate_limit_max_retries do
+          backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+        else
+          log_and_fail(payload, response)
+        end
+
+      {:ok, response} ->
+        log_and_fail(payload, response)
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
         {:error, {:linear_api_request, reason}}
     end
+  end
+
+  defp maybe_retry_status(payload, request_fun, sleep_fun, attempt, response) do
+    if attempt < @rate_limit_max_retries do
+      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+    else
+      log_and_fail(payload, response)
+    end
+  end
+
+  defp backoff_and_retry(payload, request_fun, sleep_fun, attempt) do
+    delay = @rate_limit_base_backoff_ms * Integer.pow(2, attempt)
+    Logger.warning("Linear rate-limited; backing off #{delay}ms (attempt #{attempt + 1}/#{@rate_limit_max_retries})")
+    sleep_fun.(delay)
+    do_graphql(payload, request_fun, sleep_fun, attempt + 1)
+  end
+
+  defp rate_limited_body?(%{"errors" => errors}) when is_list(errors) do
+    Enum.any?(errors, fn err -> get_in(err, ["extensions", "code"]) == "RATELIMITED" end)
+  end
+
+  defp rate_limited_body?(_body), do: false
+
+  defp log_and_fail(payload, response) do
+    Logger.error(
+      "Linear GraphQL request failed status=#{response.status}" <>
+        linear_error_context(payload, response)
+    )
+
+    {:error, {:linear_api_status, response.status}}
   end
 
   @doc false

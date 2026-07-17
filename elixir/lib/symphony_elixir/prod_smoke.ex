@@ -251,7 +251,7 @@ defmodule SymphonyElixir.ProdSmoke do
       terminal_states:
     #{yaml_list(terminal_states, 4)}
     polling:
-      interval_ms: 2000
+      interval_ms: 20000
     workspace:
       root: #{workspace_root}
     agent:
