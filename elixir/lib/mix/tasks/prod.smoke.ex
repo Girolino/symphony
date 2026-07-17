@@ -10,8 +10,8 @@ defmodule Mix.Tasks.Prod.Smoke do
   issue to be completed by a real agent turn, asserts `/api/v1/state` and the
   dashboard, cleans up, and writes a machine-readable report.
 
-      mix prod.smoke [--port 4799] [--timeout-ms 300000] [--report-dir path]
-                     [--team-key SYME2E]
+      mix prod.smoke [--port 4799] [--timeout-ms 900000] [--report-dir path]
+                     [--team-key SYM]
 
   Exits non-zero on FAIL so callers (promote script, lanes) can gate on it.
   """

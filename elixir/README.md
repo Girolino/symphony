@@ -199,7 +199,7 @@ make e2e
 
 Optional environment variables:
 
-- `SYMPHONY_LIVE_LINEAR_TEAM_KEY` defaults to `SYME2E`
+- `SYMPHONY_LIVE_LINEAR_TEAM_KEY` defaults to `SYM`
 - `SYMPHONY_LIVE_SSH_WORKER_HOSTS` uses those SSH hosts when set, as a comma-separated list
 
 `make e2e` runs two live scenarios:
