@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ProdSmokeTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.ProdSmoke
+  alias SymphonyElixir.{ProdSmoke, Workflow}
 
   describe "parse_api_key_file/1" do
     test "extracts a plain key" do
@@ -61,7 +61,74 @@ defmodule SymphonyElixir.ProdSmokeTest do
       assert contents =~ ~s(- "Todo")
       assert contents =~ ~s(- "Done")
       assert contents =~ "max_concurrent_agents: 1"
+      assert contents =~ "git init -q"
+      assert contents =~ "symphony-prod-smoke@example.invalid"
+      assert contents =~ "printf '%s\\n'"
+      assert contents =~ "git add README.md"
+      assert contents =~ "commit.gpgSign=false"
+      assert contents =~ "core.hooksPath=.git/symphony-prod-smoke-no-hooks"
+      assert contents =~ "--no-verify"
+      assert contents =~ "Initialize prod smoke workspace"
+      refute contents =~ "git clone"
       assert contents =~ "PROMPT-BODY"
+    end
+
+    test "bootstrap hook ignores hostile global git signing and hooks" do
+      run_dir = Path.join(System.tmp_dir!(), "prod-smoke-git-#{System.unique_integer([:positive])}")
+      workflow_path = Path.join(run_dir, "WORKFLOW.md")
+      workspace = Path.join(run_dir, "workspace")
+      hooks_dir = Path.join(run_dir, "hooks")
+      gpg_marker = Path.join(run_dir, "gpg-called")
+      hook_marker = Path.join(run_dir, "hook-called")
+      gpg_program = Path.join(run_dir, "fail-gpg.sh")
+      global_config = Path.join(run_dir, "gitconfig")
+
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(hooks_dir)
+      on_exit(fn -> File.rm_rf(run_dir) end)
+
+      File.write!(gpg_program, "#!/bin/sh\n: > \"$GPG_MARKER\"\nexit 1\n")
+      File.chmod!(gpg_program, 0o755)
+
+      for hook <- ["pre-commit", "prepare-commit-msg", "commit-msg"] do
+        hook_path = Path.join(hooks_dir, hook)
+        File.write!(hook_path, "#!/bin/sh\n: > \"$HOOK_MARKER\"\nexit 1\n")
+        File.chmod!(hook_path, 0o755)
+      end
+
+      File.write!(global_config, """
+      [commit]
+        gpgsign = true
+      [gpg]
+        program = #{gpg_program}
+      [core]
+        hooksPath = #{hooks_dir}
+      """)
+
+      workflow =
+        ProdSmoke.render_workflow(%{
+          project_slug: "smoke-slug",
+          active_states: ["Todo"],
+          terminal_states: ["Done"],
+          workspace_root: Path.join(run_dir, "workspaces"),
+          prompt: "PROMPT-BODY"
+        })
+
+      File.write!(workflow_path, workflow)
+      assert {:ok, %{config: %{"hooks" => %{"after_create" => hook}}}} = Workflow.load(workflow_path)
+
+      env = [
+        {"GIT_CONFIG_GLOBAL", global_config},
+        {"GIT_CONFIG_NOSYSTEM", "1"},
+        {"GPG_MARKER", gpg_marker},
+        {"HOOK_MARKER", hook_marker}
+      ]
+
+      assert {_output, 0} = System.cmd("sh", ["-c", hook], cd: workspace, env: env, stderr_to_stdout: true)
+      assert {subject, 0} = System.cmd("git", ["-C", workspace, "log", "--format=%s", "-1"], env: env)
+      assert String.trim(subject) == "Initialize prod smoke workspace"
+      refute File.exists?(gpg_marker)
+      refute File.exists?(hook_marker)
     end
   end
 

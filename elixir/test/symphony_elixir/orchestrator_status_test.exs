@@ -347,6 +347,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     metrics_root =
       Path.join(System.tmp_dir!(), "symphony-metrics-ledger-#{System.unique_integer([:positive])}")
 
+    File.rm_rf!(metrics_root)
     ledger_file = MetricsLedger.default_ledger_file(metrics_root)
     Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_file)
 
@@ -424,6 +425,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       Process.exit(first_pid, :normal)
     end
 
+    Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_file)
     second_orchestrator_name = Module.concat(__MODULE__, :PersistedTotalsSecondOrchestrator)
     {:ok, second_pid} = Orchestrator.start_link(name: second_orchestrator_name)
 
@@ -1886,6 +1888,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "application stop renders offline status" do
+    on_exit(fn ->
+      Application.ensure_all_started(:symphony_elixir)
+    end)
+
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)
