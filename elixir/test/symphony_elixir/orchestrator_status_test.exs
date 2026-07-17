@@ -1109,7 +1109,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
-    tick_started_ms = System.monotonic_time(:millisecond)
+    retry_window_started_at_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
@@ -1124,12 +1124,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    scheduled_delay_ms = due_at_ms - tick_started_ms
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert scheduled_delay_ms >= 10_000
-    assert scheduled_delay_ms <= 11_500
-    assert remaining_ms >= 0
-    assert remaining_ms <= 10_500
+    assert due_at_ms >= retry_window_started_at_ms + 10_000
+    assert due_at_ms <= retry_window_started_at_ms + 10_500
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
@@ -1617,22 +1613,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "status dashboard renders last codex message in EVENT column" do
     row =
-      StatusDashboard.format_running_summary_for_test(%{
-        identifier: "MT-233",
-        state: "running",
-        session_id: "thread-1234567890",
-        codex_app_server_pid: "4242",
-        codex_total_tokens: 12,
-        runtime_seconds: 15,
-        last_codex_event: :notification,
-        last_codex_message: %{
-          event: :notification,
-          message: %{
-            "method" => "turn/completed",
-            "params" => %{"turn" => %{"status" => "completed"}}
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-233",
+          state: "running",
+          session_id: "thread-1234567890",
+          codex_app_server_pid: "4242",
+          codex_total_tokens: 12,
+          runtime_seconds: 15,
+          last_codex_event: :notification,
+          last_codex_message: %{
+            event: :notification,
+            message: %{
+              "method" => "turn/completed",
+              "params" => %{"turn" => %{"status" => "completed"}}
+            }
           }
-        }
-      })
+        },
+        140
+      )
 
     plain = Regex.replace(~r/\e\[[\\d;]*m/, row, "")
 
@@ -1652,16 +1651,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         " after\nline"
 
     row =
-      StatusDashboard.format_running_summary_for_test(%{
-        identifier: "MT-898",
-        state: "running",
-        session_id: "thread-1234567890",
-        codex_app_server_pid: "4242",
-        codex_total_tokens: 12,
-        runtime_seconds: 15,
-        last_codex_event: :notification,
-        last_codex_message: payload
-      })
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-898",
+          state: "running",
+          session_id: "thread-1234567890",
+          codex_app_server_pid: "4242",
+          codex_total_tokens: 12,
+          runtime_seconds: 15,
+          last_codex_event: :notification,
+          last_codex_message: payload
+        },
+        140
+      )
 
     plain = Regex.replace(~r/\e\[[0-9;]*m/, row, "")
 

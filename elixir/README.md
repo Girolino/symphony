@@ -118,12 +118,20 @@ Notes:
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue
+    workspace and that workspace's `.git` metadata directory, with read-only access left at
+    `fullAccess`
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
-  Symphony validation.
+- When `codex.turn_sandbox_policy` is set explicitly, Symphony otherwise passes the map through to
+  Codex unchanged. Compatibility then depends on the targeted Codex app-server version rather than
+  local Symphony validation.
+- If an explicit `workspaceWrite` turn sandbox policy omits `writableRoots`, Symphony completes it
+  at runtime with the current issue workspace and its `.git` metadata directory. Explicit nonempty
+  `writableRoots` are left unchanged.
+- Mix 1.19 starts `Mix.Sync.PubSub` before project code and opens a loopback TCP socket. If a lane
+  runs Mix tasks such as tests or `mix ops.file_issue`, set `networkAccess: true` on that lane's
+  `workspaceWrite` turn sandbox policy.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
