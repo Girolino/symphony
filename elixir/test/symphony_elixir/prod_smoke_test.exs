@@ -64,6 +64,7 @@ defmodule SymphonyElixir.ProdSmokeTest do
       assert contents =~ "git init -q"
       assert contents =~ "symphony-prod-smoke@example.invalid"
       assert contents =~ "printf '%s\\n'"
+      assert contents =~ "git add README.md"
       assert contents =~ "Initialize prod smoke workspace"
       refute contents =~ "git clone"
       assert contents =~ "PROMPT-BODY"

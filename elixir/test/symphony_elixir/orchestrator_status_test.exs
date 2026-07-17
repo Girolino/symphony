@@ -347,6 +347,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     metrics_root =
       Path.join(System.tmp_dir!(), "symphony-metrics-ledger-#{System.unique_integer([:positive])}")
 
+    File.rm_rf!(metrics_root)
     ledger_file = MetricsLedger.default_ledger_file(metrics_root)
     Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_file)
 
@@ -424,6 +425,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       Process.exit(first_pid, :normal)
     end
 
+    Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_file)
     second_orchestrator_name = Module.concat(__MODULE__, :PersistedTotalsSecondOrchestrator)
     {:ok, second_pid} = Orchestrator.start_link(name: second_orchestrator_name)
 
@@ -1107,6 +1109,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    tick_started_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
@@ -1121,8 +1124,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
+    scheduled_delay_ms = due_at_ms - tick_started_ms
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_000
+    assert scheduled_delay_ms >= 10_000
+    assert scheduled_delay_ms <= 11_500
+    assert remaining_ms >= 0
     assert remaining_ms <= 10_500
   end
 
