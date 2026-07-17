@@ -33,4 +33,29 @@ if [ "$main_sha" = "$current_sha" ]; then
 fi
 
 echo "auto-promote: promoting $main_sha (current pin: $current_sha)"
-exec "$PROMOTE_REPO/scripts/promote.sh"
+# --skip-gate --no-push: this SHA is already on origin/main (we reset to it),
+# so it already passed CI and is already pushed. Re-running the full gate and
+# re-pushing here only re-triggers timing-sensitive tests under the loaded
+# promote environment — the recurring flaky-gate blocker. The boot check and
+# real smoke still validate the actual release artifact; rollback still
+# protects against a genuinely broken release.
+# One Linear API key is shared by every daemon; the promote smoke runs a real
+# Codex turn that needs Linear rate-limit headroom to complete its disposable
+# issue. Quiesce the always-on lane (and its watchdog, so it doesn't fight the
+# pause) for the promote window so the smoke gets the budget to itself. The
+# trap guarantees both come back on any exit. Lane-daemon management lives here
+# (symphony-specific), never in the generic promote.sh.
+UID_NUM="$(id -u)"
+quiesce() { launchctl bootout "gui/$UID_NUM/$1" 2>/dev/null || true; }
+resume() { launchctl bootstrap "gui/$UID_NUM" "$HOME/Library/LaunchAgents/$1.plist" 2>/dev/null || true; }
+restore_daemons() {
+  resume com.symphony.lane-watchdog
+  resume com.symphony.lane
+}
+trap restore_daemons EXIT
+
+echo "auto-promote: quiescing lane + watchdog for the smoke window"
+quiesce com.symphony.lane-watchdog
+quiesce com.symphony.lane
+
+"$PROMOTE_REPO/scripts/promote.sh" --skip-gate --no-push

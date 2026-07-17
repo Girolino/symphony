@@ -24,7 +24,13 @@ defmodule SymphonyElixir.ProdSmoke do
   alias SymphonyElixir.OpsTransport
 
   @default_port 4799
-  @default_timeout_ms 300_000
+  # A real Codex turn shares one host with the always-on lane daemon and the
+  # rate-limited Linear API; under contention completion legitimately takes
+  # well over 5 minutes. The smoke is a correctness check, not a latency SLA,
+  # so it stays patient rather than failing an otherwise-good release (the
+  # single-host coupling residual). Rollback still protects against a genuinely
+  # broken release — this only stops flaky timeouts from blocking the pin.
+  @default_timeout_ms 900_000
   @default_health_timeout_ms 60_000
   @default_poll_interval_ms 15_000
   @default_team_key "SYME2E"
@@ -245,7 +251,7 @@ defmodule SymphonyElixir.ProdSmoke do
       terminal_states:
     #{yaml_list(terminal_states, 4)}
     polling:
-      interval_ms: 2000
+      interval_ms: 20000
     workspace:
       root: #{workspace_root}
     hooks:
