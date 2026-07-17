@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Config.Schema do
   alias SymphonyElixir.PathSafety
 
   @primary_key false
+  @git_metadata_dir ".git"
 
   @type t :: %__MODULE__{}
 
@@ -325,6 +326,9 @@ defmodule SymphonyElixir.Config.Schema do
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
+      %{"type" => "workspaceWrite"} = policy ->
+        hydrate_runtime_workspace_write_policy(policy, settings, workspace, opts)
+
       %{} = policy ->
         {:ok, policy}
 
@@ -500,7 +504,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp default_turn_sandbox_policy(workspace) do
     %{
       "type" => "workspaceWrite",
-      "writableRoots" => [workspace],
+      "writableRoots" => default_workspace_write_roots(workspace),
       "readOnlyAccess" => %{"type" => "fullAccess"},
       "networkAccess" => false,
       "excludeTmpdirEnvVar" => false,
@@ -509,18 +513,52 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp default_runtime_turn_sandbox_policy(workspace_root, opts) when is_binary(workspace_root) do
-    if Keyword.get(opts, :remote, false) do
-      {:ok, default_turn_sandbox_policy(workspace_root)}
-    else
-      with expanded_workspace_root <- expand_local_workspace_root(workspace_root),
-           {:ok, canonical_workspace_root} <- PathSafety.canonicalize(expanded_workspace_root) do
-        {:ok, default_turn_sandbox_policy(canonical_workspace_root)}
-      end
+    with {:ok, roots} <- default_runtime_workspace_write_roots(workspace_root, opts) do
+      {:ok,
+       %{
+         "type" => "workspaceWrite",
+         "writableRoots" => roots,
+         "readOnlyAccess" => %{"type" => "fullAccess"},
+         "networkAccess" => false,
+         "excludeTmpdirEnvVar" => false,
+         "excludeSlashTmp" => false
+       }}
     end
   end
 
   defp default_runtime_turn_sandbox_policy(workspace_root, _opts) do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
+  end
+
+  defp hydrate_runtime_workspace_write_policy(policy, settings, workspace, opts) do
+    if Map.has_key?(policy, "writableRoots") do
+      {:ok, policy}
+    else
+      workspace_root = default_workspace_root(workspace, settings.workspace.root)
+
+      with {:ok, roots} <- default_runtime_workspace_write_roots(workspace_root, opts) do
+        {:ok, Map.put(policy, "writableRoots", roots)}
+      end
+    end
+  end
+
+  defp default_runtime_workspace_write_roots(workspace_root, opts) when is_binary(workspace_root) do
+    if Keyword.get(opts, :remote, false) do
+      {:ok, default_workspace_write_roots(workspace_root)}
+    else
+      with expanded_workspace_root <- expand_local_workspace_root(workspace_root),
+           {:ok, canonical_workspace_root} <- PathSafety.canonicalize(expanded_workspace_root) do
+        {:ok, default_workspace_write_roots(canonical_workspace_root)}
+      end
+    end
+  end
+
+  defp default_runtime_workspace_write_roots(workspace_root, _opts) do
+    {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
+  end
+
+  defp default_workspace_write_roots(workspace) when is_binary(workspace) do
+    [workspace, Path.join(workspace, @git_metadata_dir)]
   end
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
