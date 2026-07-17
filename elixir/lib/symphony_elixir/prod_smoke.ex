@@ -33,7 +33,7 @@ defmodule SymphonyElixir.ProdSmoke do
   @default_timeout_ms 900_000
   @default_health_timeout_ms 60_000
   @default_poll_interval_ms 15_000
-  @default_team_key "SYME2E"
+  @default_team_key "SYM"
   @linear_endpoint "https://api.linear.app/graphql"
 
   @team_query """
@@ -376,13 +376,20 @@ defmodule SymphonyElixir.ProdSmoke do
   defp build_context(opts) do
     port = Keyword.get(opts, :port, @default_port)
     root = Keyword.get(opts, :smoke_root, Path.join(System.tmp_dir!(), smoke_run_id()))
+    get_env = Keyword.get(opts, :get_env, &System.get_env/1)
+
+    team_key =
+      case Keyword.fetch(opts, :team_key) do
+        {:ok, value} -> value
+        :error -> get_env.("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
+      end
 
     %{
       port: port,
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       health_timeout_ms: Keyword.get(opts, :health_timeout_ms, @default_health_timeout_ms),
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms),
-      team_key: Keyword.get(opts, :team_key, System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key),
+      team_key: team_key,
       report_dir: Keyword.get(opts, :report_dir, default_report_dir()),
       escript_path: Keyword.get(opts, :escript_path, Path.join(File.cwd!(), "bin/symphony")),
       smoke_root: root,
@@ -391,7 +398,7 @@ defmodule SymphonyElixir.ProdSmoke do
       spawn_fun: Keyword.get(opts, :spawn_fun, &OpsTransport.spawn_daemon/4),
       stop_fun: Keyword.get(opts, :stop_fun, &OpsTransport.stop_daemon/1),
       sleep_fun: Keyword.get(opts, :sleep_fun, &Process.sleep/1),
-      get_env: Keyword.get(opts, :get_env, &System.get_env/1),
+      get_env: get_env,
       bootstrap_path: Keyword.get(opts, :bootstrap_path, default_bootstrap_path())
     }
   end

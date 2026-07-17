@@ -409,6 +409,58 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
     assert Enum.any?(report.steps, &(&1.name == "cleanup"))
   end
 
+  test "defaults the live smoke team to the Symphony team key" do
+    parent = self()
+
+    graphql = fn _e, _k, q, variables ->
+      if String.contains?(q, "Team") do
+        send(parent, {:team_key, variables.key})
+        {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
+      else
+        {:error, :unused}
+      end
+    end
+
+    get_env = fn
+      "LINEAR_API_KEY" -> "k"
+      "SYMPHONY_LIVE_LINEAR_TEAM_KEY" -> nil
+    end
+
+    opts =
+      opts(graphql_fun: graphql, get_env: get_env)
+      |> Keyword.delete(:team_key)
+
+    assert {:error, report} = ProdSmoke.run(opts)
+    assert report.failure =~ "linear-setup"
+    assert_received {:team_key, "SYM"}
+  end
+
+  test "uses the injected live smoke team env override" do
+    parent = self()
+
+    graphql = fn _e, _k, q, variables ->
+      if String.contains?(q, "Team") do
+        send(parent, {:team_key, variables.key})
+        {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
+      else
+        {:error, :unused}
+      end
+    end
+
+    get_env = fn
+      "LINEAR_API_KEY" -> "k"
+      "SYMPHONY_LIVE_LINEAR_TEAM_KEY" -> "CUSTOM"
+    end
+
+    opts =
+      opts(graphql_fun: graphql, get_env: get_env)
+      |> Keyword.delete(:team_key)
+
+    assert {:error, report} = ProdSmoke.run(opts)
+    assert report.failure =~ "linear-setup"
+    assert_received {:team_key, "CUSTOM"}
+  end
+
   test "fails when project creation is rejected" do
     graphql = fn _e, _k, q, _v ->
       cond do

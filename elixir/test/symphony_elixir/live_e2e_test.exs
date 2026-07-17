@@ -7,7 +7,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   @moduletag :live_e2e
   @moduletag timeout: 300_000
 
-  @default_team_key "SYME2E"
+  @default_team_key "SYM"
   @default_docker_auth_json Path.join(System.user_home!(), ".codex/auth.json")
   @docker_worker_count 2
   @docker_support_dir Path.expand("../support/live_e2e_docker", __DIR__)
