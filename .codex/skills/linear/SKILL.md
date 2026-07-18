@@ -31,6 +31,12 @@ Tool behavior:
 - Treat a top-level `errors` array as a failed GraphQL operation even if the
   tool call itself completed.
 - Keep queries/mutations narrowly scoped; ask only for the fields you need.
+- Do not guess removed fields back into queries. The current `Issue` link
+  surfaces are `attachments` for attached URLs/PRs and `relations` /
+  `inverseRelations` for issue-to-issue relationships.
+- GraphQL object `id` fields may be returned as `ID`, while many Linear mutation
+  arguments and input fields are declared as `String`. Match the variable type
+  to the operation or input object you introspected.
 
 ## Discovering unfamiliar operations
 
@@ -100,11 +106,12 @@ query IssueByKey($key: String!) {
     url
     description
     updatedAt
-    links {
+    attachments {
       nodes {
         id
-        url
         title
+        url
+        sourceType
       }
     }
   }
@@ -181,6 +188,80 @@ query IssueDetails($id: String!) {
 }
 ```
 
+### Discover PR links and issue relations
+
+Use `attachments` for attached PRs and URL links. Use `relations` and
+`inverseRelations` only for issue-to-issue relationships. Do not query
+`Issue.links`; it is not present in the current schema.
+
+```graphql
+query IssueAttachmentsAndRelations(
+  $id: String!
+  $attachmentFirst: Int!
+  $relationFirst: Int!
+) {
+  issue(id: $id) {
+    id
+    identifier
+    attachments(first: $attachmentFirst) {
+      nodes {
+        id
+        title
+        url
+        sourceType
+      }
+    }
+    relations(first: $relationFirst) {
+      nodes {
+        id
+        type
+        relatedIssue {
+          id
+          identifier
+          title
+          url
+        }
+      }
+    }
+    inverseRelations(first: $relationFirst) {
+      nodes {
+        id
+        type
+        issue {
+          id
+          identifier
+          title
+          url
+        }
+      }
+    }
+  }
+}
+```
+
+If a link or relation path is unclear, introspect the exact types before writing
+the query:
+
+```graphql
+query IssueLinkFieldDiscovery {
+  issue: __type(name: "Issue") {
+    fields {
+      name
+    }
+  }
+  attachment: __type(name: "Attachment") {
+    fields {
+      name
+    }
+  }
+  relation: __type(name: "IssueRelation") {
+    fields {
+      name
+    }
+  }
+}
+```
+
 ### Query team workflow states for an issue
 
 Use this before changing issue state when you need the exact `stateId`:
@@ -239,7 +320,9 @@ mutation CreateComment($issueId: String!, $body: String!) {
 
 ### Move an issue to a different state
 
-Use `issueUpdate` with the destination `stateId`:
+Use `issueUpdate` with the destination `stateId`. In the current schema, both
+the top-level mutation `id` argument and the `stateId` input field are `String`
+values:
 
 ```graphql
 mutation MoveIssueToState($id: String!, $stateId: String!) {
@@ -251,6 +334,83 @@ mutation MoveIssueToState($id: String!, $stateId: String!) {
       state {
         id
         name
+      }
+    }
+  }
+}
+```
+
+### Create an issue in a project
+
+Use the exact scalar types from `IssueCreateInput`: `teamId` is `String!`, while
+`projectId` and `stateId` are nullable `String` fields. Do not declare these as
+`ID` unless current introspection says the field changed.
+
+```graphql
+mutation CreateIssueInProject(
+  $teamId: String!
+  $title: String!
+  $description: String
+  $projectId: String
+  $stateId: String
+) {
+  issueCreate(
+    input: {
+      teamId: $teamId
+      title: $title
+      description: $description
+      projectId: $projectId
+      stateId: $stateId
+    }
+  ) {
+    success
+    issue {
+      id
+      identifier
+      url
+      project {
+        id
+        name
+      }
+      state {
+        id
+        name
+      }
+    }
+  }
+}
+```
+
+### Create an issue relation
+
+Use `String!` for `issueId` and `relatedIssueId`, and use the
+`IssueRelationType!` enum for the relation type. Current enum values are
+`blocks`, `duplicate`, `related`, and `similar`.
+
+```graphql
+mutation CreateIssueRelation(
+  $issueId: String!
+  $relatedIssueId: String!
+  $type: IssueRelationType!
+) {
+  issueRelationCreate(
+    input: {
+      issueId: $issueId
+      relatedIssueId: $relatedIssueId
+      type: $type
+    }
+  ) {
+    success
+    issueRelation {
+      id
+      type
+      issue {
+        id
+        identifier
+      }
+      relatedIssue {
+        id
+        identifier
       }
     }
   }
@@ -381,6 +541,12 @@ mutation FileUpload(
   key -> identifier search -> internal id.
 - For state transitions, fetch team states first and use the exact `stateId`
   instead of hardcoding names inside mutations.
+- For issue/project/state/comment/relation mutation variables, mirror the
+  introspected schema. In the current Linear schema, `issueId`,
+  `relatedIssueId`, `projectId`, `stateId`, and mutation `id` arguments shown
+  above are `String` / `String!`, not `ID` / `ID!`.
+- For PR or URL discovery, query `attachments`; for issue-to-issue dependency or
+  related-ticket discovery, query `relations` / `inverseRelations`.
 - Prefer `attachmentLinkGitHubPR` over a generic URL attachment when linking a
   GitHub PR to a Linear issue.
 - Do not introduce new raw-token shell helpers for GraphQL access.
