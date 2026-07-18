@@ -32,6 +32,15 @@ When logging Codex execution lifecycle events, include:
 - `Orchestrator`: log dispatch, retry, terminal/non-active transitions, and worker exits with issue context. Include `session_id` whenever running-entry data has it.
 - `Codex.AppServer`: log session start/completion/error with issue context and `session_id`.
 
+## Codex Side Output
+
+`Codex.AppServer` logs non-JSON Codex stream output at warning level when it looks
+like failure text. Known `codex_models_manager::*` cache schema drift for a
+missing `supports_reasoning_summaries` field is logged at debug level instead:
+it reflects upstream cached model metadata from an older schema, Codex can renew
+the cache, and repeated lane inspections showed no runtime outage. Keep this
+exception field-specific so new Codex failures still surface.
+
 ## Checklist For New Logs
 
 - Is this event tied to a Linear issue? Include `issue_id` and `issue_identifier`.
