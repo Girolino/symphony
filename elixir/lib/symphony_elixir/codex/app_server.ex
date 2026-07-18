@@ -971,12 +971,29 @@ defmodule SymphonyElixir.Codex.AppServer do
       |> String.slice(0, @max_stream_log_bytes)
 
     if text != "" do
-      if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
-        Logger.warning("Codex #{stream_label} output: #{text}")
-      else
-        Logger.debug("Codex #{stream_label} output: #{text}")
-      end
+      Logger.log(non_json_stream_log_level(text), "Codex #{stream_label} output: #{text}")
     end
+  end
+
+  defp non_json_stream_log_level(text) do
+    cond do
+      known_benign_model_cache_schema_warning?(text) ->
+        :debug
+
+      String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) ->
+        :warning
+
+      true ->
+        :debug
+    end
+  end
+
+  defp known_benign_model_cache_schema_warning?(text) do
+    normalized_text = String.downcase(text)
+
+    String.contains?(normalized_text, "codex_models_manager::") and
+      String.contains?(normalized_text, "missing field") and
+      String.contains?(normalized_text, "supports_reasoning_summaries")
   end
 
   defp protocol_message_candidate?(data) do
