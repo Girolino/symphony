@@ -247,15 +247,88 @@ query IssueLinkFieldDiscovery {
   issue: __type(name: "Issue") {
     fields {
       name
+      args {
+        name
+        type {
+          kind
+          name
+          ofType {
+            kind
+            name
+            ofType {
+              kind
+              name
+            }
+          }
+        }
+      }
+      type {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+      }
     }
   }
   attachment: __type(name: "Attachment") {
     fields {
       name
+      type {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+      }
     }
   }
   relation: __type(name: "IssueRelation") {
     fields {
+      name
+      type {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+      }
+    }
+  }
+  relationInput: __type(name: "IssueRelationCreateInput") {
+    inputFields {
+      name
+      type {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+          }
+        }
+      }
+    }
+  }
+  relationTypes: __type(name: "IssueRelationType") {
+    enumValues {
       name
     }
   }
