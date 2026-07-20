@@ -161,8 +161,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:codex_worker_update, issue_id, notification.(2)})
     assert :sys.get_state(pid).codex_snapshot_publish_token == first_token
 
-    Process.sleep(300)
-    assert :sys.get_state(pid).codex_snapshot_publish_token == nil
+    wait_for_state(pid, fn state -> state.codex_snapshot_publish_token == nil end, 5_000)
 
     assert {:ok, %{running: [snapshot_entry]}} =
              SymphonyElixir.OrchestratorSnapshotStore.fetch(orchestrator_name)
