@@ -229,8 +229,15 @@ defmodule SymphonyElixir.ProdSmokeTest do
        }}
     end
 
-    defp fake_graphql(calls, complete_after_polls) do
-      fn _endpoint, _api_key, query, _variables ->
+    defp default_team_states do
+      [
+        %{"id" => "s1", "name" => "Todo", "position" => 1, "type" => "unstarted"},
+        %{"id" => "s2", "name" => "Done", "position" => 2, "type" => "completed"}
+      ]
+    end
+
+    defp fake_graphql(calls, complete_after_polls, states \\ default_team_states()) do
+      fn _endpoint, _api_key, query, variables ->
         cond do
           String.contains?(query, "SymphonyProdSmokeTeam") ->
             record(calls, :team)
@@ -245,10 +252,7 @@ defmodule SymphonyElixir.ProdSmokeTest do
                        "key" => "SYME2E",
                        "name" => "Smoke Team",
                        "states" => %{
-                         "nodes" => [
-                           %{"id" => "s1", "name" => "Todo", "type" => "unstarted"},
-                           %{"id" => "s2", "name" => "Done", "type" => "completed"}
-                         ]
+                         "nodes" => states
                        }
                      }
                    ]
@@ -271,6 +275,7 @@ defmodule SymphonyElixir.ProdSmokeTest do
 
           String.contains?(query, "SymphonyProdSmokeCreateIssue") ->
             record(calls, :create_issue)
+            record(calls, {:create_issue_state_id, variables.stateId})
 
             {:ok,
              %{
@@ -373,6 +378,40 @@ defmodule SymphonyElixir.ProdSmokeTest do
       refute inspect(decoded) =~ "fake-key-for-tests"
 
       refute File.exists?(ctx.smoke_root)
+    end
+
+    test "creates the smoke issue in the earliest unstarted workflow state by position", ctx do
+      states = [
+        %{"id" => "state-deferred", "name" => "Deferred", "position" => 1_000, "type" => "backlog"},
+        %{"id" => "state-rework", "name" => "Rework", "position" => 1_001, "type" => "unstarted"},
+        %{"id" => "state-progress", "name" => "In Progress", "position" => 0, "type" => "started"},
+        %{"id" => "state-todo", "name" => "Todo", "position" => 1, "type" => "unstarted"},
+        %{"id" => "state-done", "name" => "Done", "position" => 3, "type" => "completed"},
+        %{"id" => "state-canceled", "name" => "Canceled", "position" => 4, "type" => "canceled"},
+        %{"id" => "state-duplicate", "name" => "Duplicate", "position" => 5, "type" => "duplicate"}
+      ]
+
+      opts =
+        ctx
+        |> base_opts(2)
+        |> Keyword.put(:graphql_fun, fake_graphql(ctx.calls, 2, states))
+        |> Keyword.put(:spawn_fun, fn _escript, workflow_path, _port, _env ->
+          record(ctx.calls, {:workflow, File.read!(workflow_path)})
+          {:ok, %{fake: true}}
+        end)
+
+      assert {:ok, _report} = ProdSmoke.run(opts)
+
+      ops = Agent.get(ctx.calls, & &1.ops)
+      assert {:create_issue_state_id, "state-todo"} in ops
+
+      assert {:workflow, workflow} = Enum.find(ops, &match?({:workflow, _}, &1))
+      assert workflow =~ ~s(- "Todo")
+      assert workflow =~ ~s(- "In Progress")
+      assert workflow =~ ~s(- "Done")
+      assert workflow =~ ~s(- "Canceled")
+      assert workflow =~ ~s(- "Duplicate")
+      refute workflow =~ ~s(- "Backlog")
     end
 
     test "fails when the issue never completes, still cleaning up", ctx do
