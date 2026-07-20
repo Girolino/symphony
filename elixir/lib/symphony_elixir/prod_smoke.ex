@@ -47,6 +47,7 @@ defmodule SymphonyElixir.ProdSmoke do
           nodes {
             id
             name
+            position
             type
           }
         }
@@ -736,11 +737,11 @@ defmodule SymphonyElixir.ProdSmoke do
   end
 
   defp create_issue(context, api_key, team, project) do
-    active_state =
+    initial_state =
       team
       |> get_in(["states", "nodes"])
       |> List.wrap()
-      |> Enum.find(&(&1["type"] in ["started", "unstarted"]))
+      |> initial_issue_state()
 
     title = "Symphony prod smoke for #{project["name"]}"
 
@@ -749,7 +750,7 @@ defmodule SymphonyElixir.ProdSmoke do
            projectId: project["id"],
            title: title,
            description: title,
-           stateId: active_state && active_state["id"]
+           stateId: initial_state && initial_state["id"]
          }) do
       {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => issue}}}} -> {:ok, issue}
       {:ok, payload} -> {:error, {:issue_create_failed, redact_payload(payload)}}
@@ -778,7 +779,8 @@ defmodule SymphonyElixir.ProdSmoke do
       team
       |> get_in(["states", "nodes"])
       |> List.wrap()
-      |> Enum.reject(&(&1["type"] in ["completed", "canceled"]))
+      |> Enum.filter(&(&1["type"] in ["unstarted", "started"]))
+      |> Enum.sort_by(&state_order_key/1)
       |> Enum.map(& &1["name"])
       |> non_empty(["Todo", "In Progress"])
 
@@ -786,9 +788,10 @@ defmodule SymphonyElixir.ProdSmoke do
       team
       |> get_in(["states", "nodes"])
       |> List.wrap()
-      |> Enum.filter(&(&1["type"] in ["completed", "canceled"]))
+      |> Enum.filter(&(&1["type"] in ["completed", "canceled", "duplicate"]))
+      |> Enum.sort_by(&state_order_key/1)
       |> Enum.map(& &1["name"])
-      |> non_empty(["Done", "Canceled"])
+      |> non_empty(["Done", "Canceled", "Duplicate"])
 
     render_workflow(%{
       project_slug: get_in(linear, [:project, "slugId"]),
@@ -873,6 +876,31 @@ defmodule SymphonyElixir.ProdSmoke do
 
   defp non_empty([], fallback), do: fallback
   defp non_empty(list, _fallback), do: list
+
+  defp initial_issue_state(states) when is_list(states) do
+    states
+    |> Enum.filter(&(&1["type"] == "unstarted"))
+    |> Enum.sort_by(&state_order_key/1)
+    |> List.first()
+    |> case do
+      nil ->
+        states
+        |> Enum.filter(&(&1["type"] == "started"))
+        |> Enum.sort_by(&state_order_key/1)
+        |> List.first()
+
+      state ->
+        state
+    end
+  end
+
+  defp state_order_key(%{"position" => position, "name" => name}) when is_number(position) do
+    {0, position, String.downcase(to_string(name || ""))}
+  end
+
+  defp state_order_key(%{"name" => name}) do
+    {1, 0, String.downcase(to_string(name || ""))}
+  end
 
   defp yaml_list(items, indent) do
     prefix = String.duplicate(" ", indent)
