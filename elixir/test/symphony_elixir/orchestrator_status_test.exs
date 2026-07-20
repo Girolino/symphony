@@ -161,10 +161,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, {:codex_worker_update, issue_id, notification.(2)})
     assert :sys.get_state(pid).codex_snapshot_publish_token == first_token
 
-    wait_for_state(pid, fn state -> state.codex_snapshot_publish_token == nil end, 5_000)
+    assert %{codex_snapshot_publish_token: nil} =
+             wait_for_state(pid, fn state -> state.codex_snapshot_publish_token == nil end, 5_000)
 
-    assert {:ok, %{running: [snapshot_entry]}} =
-             SymphonyElixir.OrchestratorSnapshotStore.fetch(orchestrator_name)
+    assert %{running: [snapshot_entry]} =
+             wait_for_published_snapshot(
+               orchestrator_name,
+               fn
+                 %{running: [snapshot_entry]} ->
+                   get_in(snapshot_entry, [:last_codex_message, :message, "params", "sequence"]) == 2
+
+                 _snapshot ->
+                   false
+               end,
+               5_000
+             )
 
     assert get_in(snapshot_entry, [:last_codex_message, :message, "params", "sequence"]) == 2
   end
@@ -1910,6 +1921,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_state(pid, predicate, deadline_ms)
   end
 
+  defp wait_for_published_snapshot(orchestrator_name, predicate, timeout_ms)
+       when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_published_snapshot(orchestrator_name, predicate, deadline_ms)
+  end
+
   defp do_wait_for_state(pid, predicate, deadline_ms) do
     state = :sys.get_state(pid)
 
@@ -1923,6 +1940,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       true ->
         Process.sleep(5)
         do_wait_for_state(pid, predicate, deadline_ms)
+    end
+  end
+
+  defp do_wait_for_published_snapshot(orchestrator_name, predicate, deadline_ms) do
+    fetch_result = SymphonyElixir.OrchestratorSnapshotStore.fetch(orchestrator_name)
+
+    case fetch_result do
+      {:ok, snapshot} ->
+        if predicate.(snapshot) do
+          snapshot
+        else
+          retry_published_snapshot(orchestrator_name, predicate, deadline_ms, fetch_result)
+        end
+
+      :missing ->
+        retry_published_snapshot(orchestrator_name, predicate, deadline_ms, fetch_result)
+    end
+  end
+
+  defp retry_published_snapshot(orchestrator_name, predicate, deadline_ms, fetch_result) do
+    if System.monotonic_time(:millisecond) >= deadline_ms do
+      flunk("timed out waiting for published orchestrator snapshot: #{inspect(fetch_result)}")
+    else
+      Process.sleep(5)
+      do_wait_for_published_snapshot(orchestrator_name, predicate, deadline_ms)
     end
   end
 
