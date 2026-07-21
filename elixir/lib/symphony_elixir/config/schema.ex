@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
-  alias SymphonyElixir.PathSafety
+  alias SymphonyElixir.{Linear.Auth, PathSafety}
 
   @primary_key false
   @git_metadata_dir ".git"
@@ -390,7 +390,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
+      | api_key: resolve_linear_api_key(settings.tracker.api_key),
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
     }
 
@@ -442,6 +442,36 @@ defmodule SymphonyElixir.Config.Schema do
       resolved when is_binary(resolved) -> normalize_secret_value(resolved)
       resolved -> resolved
     end
+  end
+
+  defp resolve_linear_api_key(nil) do
+    case Auth.resolve_api_key(nil) do
+      {:ok, token} -> token
+      {:error, :missing_linear_api_token} -> nil
+    end
+  end
+
+  defp resolve_linear_api_key(value) when is_binary(value) do
+    case env_reference_name(value) do
+      {:ok, env_name} ->
+        resolve_linear_env_api_key(env_name)
+
+      :error ->
+        normalize_secret_value(value)
+    end
+  end
+
+  defp resolve_linear_env_api_key("LINEAR_API_KEY") do
+    case System.get_env("LINEAR_API_KEY") |> normalize_secret_value() do
+      nil -> resolve_linear_api_key(nil)
+      env_value -> env_value
+    end
+  end
+
+  defp resolve_linear_env_api_key(env_name) do
+    env_name
+    |> System.get_env()
+    |> normalize_secret_value()
   end
 
   defp resolve_path_value(value, default) when is_binary(value) do

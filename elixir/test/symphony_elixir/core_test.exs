@@ -1,6 +1,26 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  defp eventually(fun, timeout_ms \\ 3_000) when is_function(fun, 0) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    case fun.() do
+      {:ok, result} ->
+        result
+
+      _pending ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("condition not reached before timeout")
+        else
+          Process.sleep(25)
+          do_eventually(fun, deadline)
+        end
+    end
+  end
+
   defmodule AuthFailureLinearClient do
     @spec fetch_candidate_issues() :: {:error, {:linear_api_status, 401}}
     def fetch_candidate_issues, do: {:error, {:linear_api_status, 401}}
@@ -426,8 +446,17 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       send(pid, :tick)
-      Process.sleep(100)
-      state = :sys.get_state(pid)
+
+      state =
+        eventually(fn ->
+          state = :sys.get_state(pid)
+
+          if Map.has_key?(state.running, issue_id) do
+            :pending
+          else
+            {:ok, state}
+          end
+        end)
 
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
@@ -1063,6 +1092,101 @@ defmodule SymphonyElixir.CoreTest do
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
     assert prompt == "Retry #2"
+  end
+
+  defp with_completed_turn_agent_runner_fixture(prefix, fun) do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-agent-runner-#{prefix}-#{System.unique_integer([:positive])}")
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-refresh"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-refresh"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 2
+      )
+
+      issue = %Issue{
+        id: "issue-#{prefix}",
+        identifier: "MT-#{String.upcase(prefix)}",
+        title: "Refresh boundary",
+        description: "Exercise post-turn refresh",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-#{String.upcase(prefix)}",
+        labels: []
+      }
+
+      fun.(issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops cleanly when post-turn issue refresh fails auth" do
+    with_completed_turn_agent_runner_fixture("auth-refresh", fn issue ->
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   AgentRunner.run(
+                     issue,
+                     nil,
+                     issue_state_fetcher: fn [_issue_id] -> {:error, {:linear_api_status, 401}} end
+                   )
+        end)
+
+      assert log =~ "Issue state refresh auth failed"
+      assert log =~ "issue_identifier=#{issue.identifier}"
+    end)
+  end
+
+  test "agent runner still raises non-auth post-turn issue refresh failures" do
+    with_completed_turn_agent_runner_fixture("state-refresh", fn issue ->
+      assert_raise RuntimeError, ~r/issue_state_refresh_failed, {:linear_api_status, 500}/, fn ->
+        AgentRunner.run(
+          issue,
+          nil,
+          issue_state_fetcher: fn [_issue_id] -> {:error, {:linear_api_status, 500}} end
+        )
+      end
+    end)
   end
 
   test "agent runner keeps workspace after successful codex run" do

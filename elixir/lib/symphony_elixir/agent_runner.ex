@@ -5,7 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Linear.{Client, Issue}
 
   @type worker_host :: String.t() | nil
 
@@ -202,7 +203,12 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, issue}
 
       {:error, reason} ->
-        {:error, {:issue_state_refresh_failed, reason}}
+        if Client.auth_failure?(reason) do
+          Logger.error("Issue state refresh auth failed for #{issue_context(issue)} after completed turn: #{inspect(reason)}")
+          {:done, issue}
+        else
+          {:error, {:issue_state_refresh_failed, reason}}
+        end
     end
   end
 

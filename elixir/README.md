@@ -35,10 +35,11 @@ Linear issue can become a dispatch candidate again after restart.
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
-   - `LINEAR_API_KEY` is the primary credential. The repo-owned `scripts/credential-probe.sh`
-     validates it directly and does not treat the bootstrap file as a primary-auth pass.
+2. Get a new personal token in Linear via Settings -> Security & access -> Personal API keys, and
+   set it as the `LINEAR_API_KEY` environment variable or in `~/.config/linear-codex/env`.
+   - `LINEAR_API_KEY` from the daemon environment is the primary credential. The repo-owned
+     `scripts/credential-probe.sh` validates it directly and does not treat the bootstrap file as a
+     primary-auth pass.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
@@ -142,7 +143,8 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`;
+  if that is unavailable, it falls back to `~/.config/linear-codex/env`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
