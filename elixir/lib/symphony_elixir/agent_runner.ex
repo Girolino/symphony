@@ -131,6 +131,13 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, _refreshed_issue} ->
           :ok
 
+        {:defer, reason} ->
+          Logger.warning(
+            "post-turn issue-state refresh failed for #{issue_context(issue)} session_id=#{turn_session[:session_id]}: #{inspect(reason)}; returning control to orchestrator continuation retry"
+          )
+
+          :ok
+
         {:error, reason} ->
           {:error, reason}
       end
@@ -204,8 +211,7 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, reason} ->
         if Client.auth_failure?(reason) do
-          Logger.error("Issue state refresh auth failed for #{issue_context(issue)} after completed turn: #{inspect(reason)}")
-          {:done, issue}
+          {:defer, reason}
         else
           {:error, {:issue_state_refresh_failed, reason}}
         end
