@@ -496,6 +496,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(value) when is_binary(value) do
+    value = String.trim(value)
     if value == "", do: nil, else: value
   end
 

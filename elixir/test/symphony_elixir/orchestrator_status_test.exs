@@ -1,6 +1,24 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  defmodule Linear401DispatchClient do
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    def fetch_candidate_issues do
+      {:ok,
+       [
+         %SymphonyElixir.Linear.Issue{
+           id: "issue-401",
+           identifier: "SYM-401",
+           title: "Auth repro",
+           state: "Todo"
+         }
+       ]}
+    end
+
+    def fetch_issue_states_by_ids(["issue-401"]), do: {:error, {:linear_api_status, 401}}
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1075,6 +1093,50 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator records poll error when pre-dispatch Linear auth revalidation fails" do
+    previous_linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+
+    on_exit(fn ->
+      if is_nil(previous_linear_client_module) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_linear_client_module)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :linear_client_module, Linear401DispatchClient)
+
+    orchestrator_name = Module.concat(__MODULE__, :Linear401DispatchOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: false, last_error: %{code: "linear_api_status", status: 401}}} ->
+            true
+
+          _ ->
+            false
+        end,
+        500
+      )
+
+    assert snapshot.running == []
+    assert snapshot.retrying == []
+    assert snapshot.blocked == []
+    assert snapshot.polling.last_error.operation == "dispatch_revalidation"
+    assert snapshot.polling.last_error.message =~ "dispatch paused for this poll"
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1247,8 +1309,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), {:shutdown, :input_required}})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
     refute Map.has_key?(state.running, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
@@ -1401,6 +1462,30 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     checking_rendered = StatusDashboard.format_snapshot_content_for_test(checking_snapshot, 0.0)
     assert checking_rendered =~ "checking now…"
+
+    error_snapshot =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         polling: %{
+           checking?: false,
+           next_poll_in_ms: 30_000,
+           poll_interval_ms: 30_000,
+           last_error: %{
+             operation: "dispatch_revalidation",
+             code: "linear_api_status",
+             status: 401,
+             message: "Linear GraphQL request failed with HTTP 401; dispatch paused for this poll."
+           }
+         }
+       }}
+
+    error_rendered = StatusDashboard.format_snapshot_content_for_test(error_snapshot, 0.0)
+    assert error_rendered =~ "Last poll error:"
+    assert error_rendered =~ "dispatch_revalidation status=401"
   end
 
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do
