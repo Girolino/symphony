@@ -15,7 +15,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "required" => ["query"],
                  "type" => "object"
                },
-               "name" => "linear_graphql"
+               "name" => "linear_graphql",
+               "type" => "function"
              }
            ] = DynamicTool.tool_specs()
 

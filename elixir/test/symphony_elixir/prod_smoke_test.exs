@@ -61,6 +61,7 @@ defmodule SymphonyElixir.ProdSmokeTest do
       assert contents =~ ~s(- "Todo")
       assert contents =~ ~s(- "Done")
       assert contents =~ "max_concurrent_agents: 1"
+      assert contents =~ "read_timeout_ms: 30000"
       assert contents =~ "git init -q"
       assert contents =~ "symphony-prod-smoke@example.invalid"
       assert contents =~ "printf '%s\\n'"

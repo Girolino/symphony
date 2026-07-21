@@ -140,8 +140,52 @@ defmodule SymphonyElixir.Linear.Auth do
 
   defp resolve_api_key_without_override(configured_token, opts) do
     configured_token
-    |> normalize_secret_value()
+    |> configured_api_key(opts)
     |> fallback_to_env(opts)
+  end
+
+  defp configured_api_key(configured_token, opts) do
+    configured_token
+    |> normalize_secret_value()
+    |> expand_env_reference(opts)
+  end
+
+  defp expand_env_reference(nil, _opts), do: nil
+
+  defp expand_env_reference("$" <> _ = token, opts) do
+    case env_reference_name(token) do
+      {:ok, name} ->
+        opts
+        |> get_env_fun()
+        |> then(& &1.(name))
+        |> normalize_secret_value()
+
+      :error ->
+        token
+    end
+  end
+
+  defp expand_env_reference(token, _opts), do: token
+
+  defp env_reference_name("$" <> raw_name) do
+    case raw_name do
+      "{" <> rest ->
+        case String.split(rest, "}", parts: 2) do
+          [name, ""] -> valid_env_reference_name(name)
+          _ -> :error
+        end
+
+      name ->
+        valid_env_reference_name(name)
+    end
+  end
+
+  defp valid_env_reference_name(name) when is_binary(name) do
+    if Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, name) do
+      {:ok, name}
+    else
+      :error
+    end
   end
 
   defp runtime_override_token(%{token: token}), do: normalize_secret_value(token)

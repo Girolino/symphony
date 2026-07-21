@@ -32,6 +32,12 @@ defmodule SymphonyElixir.LinearAuthTest do
              Auth.resolve_api_key("configured-key", get_env: env_fun, bootstrap_path: bootstrap_path)
 
     assert {:ok, "env-key"} =
+             Auth.resolve_api_key("$LINEAR_API_KEY", get_env: env_fun, bootstrap_path: bootstrap_path)
+
+    assert {:ok, "env-key"} =
+             Auth.resolve_api_key("${LINEAR_API_KEY}", get_env: env_fun, bootstrap_path: bootstrap_path)
+
+    assert {:ok, "env-key"} =
              Auth.resolve_api_key(nil, get_env: env_fun, bootstrap_path: bootstrap_path)
 
     assert {:ok, "bootstrap-key"} =

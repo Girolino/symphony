@@ -260,6 +260,7 @@ defmodule SymphonyElixir.ProdSmoke do
       approval_policy: never
       thread_sandbox: workspace-write
       turn_timeout_ms: 240000
+      read_timeout_ms: 30000
       stall_timeout_ms: 240000
     observability:
       enabled: false
