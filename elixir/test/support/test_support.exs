@@ -34,6 +34,10 @@ defmodule SymphonyElixir.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+        previous_linear_auth_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
+        previous_linear_api_key_override = Application.get_env(:symphony_elixir, :linear_api_key_override)
+
+        Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, Path.join(workflow_root, "missing-linear.env"))
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
@@ -45,6 +49,17 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :metrics_ledger_file)
+
+          case previous_linear_api_key_override do
+            nil -> Application.delete_env(:symphony_elixir, :linear_api_key_override)
+            value -> Application.put_env(:symphony_elixir, :linear_api_key_override, value)
+          end
+
+          case previous_linear_auth_bootstrap_path do
+            nil -> Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+            value -> Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, value)
+          end
+
           File.rm_rf(workflow_root)
         end)
 

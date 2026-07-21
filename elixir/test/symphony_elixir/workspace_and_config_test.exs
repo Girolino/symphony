@@ -948,6 +948,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
+  test "config falls back to the documented Linear bootstrap file" do
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    bootstrap_path = Path.join(System.tmp_dir!(), "linear-config-#{System.unique_integer([:positive])}.env")
+
+    System.delete_env("LINEAR_API_KEY")
+    File.write!(bootstrap_path, "LINEAR_API_KEY=bootstrap-linear-token\n")
+    Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, bootstrap_path)
+
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      tracker_project_slug: "project"
+    )
+
+    assert Config.settings!().tracker.api_key == "bootstrap-linear-token"
+    assert :ok = Config.validate!()
+  end
+
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

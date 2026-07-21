@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Linear.{Auth, Issue}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -109,7 +110,7 @@ defmodule SymphonyElixir.Linear.Client do
     project_slug = tracker.project_slug
 
     cond do
-      is_nil(tracker.api_key) ->
+      not auth_configured?(tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
       is_nil(project_slug) ->
@@ -133,7 +134,7 @@ defmodule SymphonyElixir.Linear.Client do
       project_slug = tracker.project_slug
 
       cond do
-        is_nil(tracker.api_key) ->
+        not auth_configured?(tracker.api_key) ->
           {:error, :missing_linear_api_token}
 
         is_nil(project_slug) ->
@@ -170,6 +171,33 @@ defmodule SymphonyElixir.Linear.Client do
     do_graphql(payload, request_fun, sleep_fun, 0)
   end
 
+  @spec validate_auth() :: :ok | {:error, term()}
+  def validate_auth do
+    case graphql(@viewer_query, %{}, operation_name: "SymphonyLinearViewer") do
+      {:ok, %{"data" => %{"viewer" => %{"id" => id}}}} when is_binary(id) ->
+        :ok
+
+      {:ok, %{"errors" => errors}} when is_list(errors) ->
+        {:error, {:linear_graphql_errors, errors}}
+
+      {:ok, _body} ->
+        {:error, :missing_linear_viewer_identity}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec auth_failure?(term()) :: boolean()
+  def auth_failure?(:missing_linear_api_token), do: true
+  def auth_failure?({:linear_api_status, status}) when status in [401, 403], do: true
+
+  def auth_failure?({:linear_graphql_errors, errors}) when is_list(errors) do
+    Enum.any?(errors, &auth_graphql_error?/1)
+  end
+
+  def auth_failure?(_reason), do: false
+
   # A single Linear API key is shared by every daemon; the combined load hits
   # Linear's rate limit, which returns RATELIMITED. Treating it as a hard error
   # makes polling/reconciliation fail spuriously. Back off and retry a bounded
@@ -179,30 +207,67 @@ defmodule SymphonyElixir.Linear.Client do
   @rate_limit_base_backoff_ms 2_000
 
   defp do_graphql(payload, request_fun, sleep_fun, attempt) do
-    with {:ok, headers} <- graphql_headers(),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      if rate_limited_body?(body) and attempt < @rate_limit_max_retries do
-        backoff_and_retry(payload, request_fun, sleep_fun, attempt)
-      else
-        {:ok, body}
-      end
-    else
-      {:ok, %{status: status} = response} when status in [429] ->
-        maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
-
-      {:ok, %{status: 400} = response} ->
-        if rate_limited_body?(response.body) and attempt < @rate_limit_max_retries do
-          backoff_and_retry(payload, request_fun, sleep_fun, attempt)
-        else
-          log_and_fail(payload, response)
-        end
-
-      {:ok, response} ->
-        log_and_fail(payload, response)
+    case graphql_headers() do
+      {:ok, token, headers} ->
+        do_graphql_with_headers(payload, request_fun, sleep_fun, attempt, token, headers)
 
       {:error, reason} ->
-        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
-        {:error, {:linear_api_request, reason}}
+        {:error, reason}
+    end
+  end
+
+  defp do_graphql_with_headers(payload, request_fun, sleep_fun, attempt, token, headers) do
+    request_fun.(payload, headers)
+    |> handle_graphql_result(payload, request_fun, sleep_fun, attempt, token)
+  end
+
+  defp handle_graphql_result({:ok, %{status: 200, body: body}}, payload, request_fun, sleep_fun, attempt, _token) do
+    maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+  end
+
+  defp handle_graphql_result(
+         {:ok, %{status: status} = response},
+         payload,
+         request_fun,
+         sleep_fun,
+         attempt,
+         token
+       )
+       when status in [401, 403] do
+    maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response)
+  end
+
+  defp handle_graphql_result({:ok, %{status: status} = response}, payload, request_fun, sleep_fun, attempt, _token)
+       when status in [429] do
+    maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
+  end
+
+  defp handle_graphql_result({:ok, %{status: 400} = response}, payload, request_fun, sleep_fun, attempt, _token) do
+    maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, attempt)
+  end
+
+  defp handle_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token) do
+    log_and_fail(payload, response)
+  end
+
+  defp handle_graphql_result({:error, reason}, _payload, _request_fun, _sleep_fun, _attempt, _token) do
+    Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+    {:error, {:linear_api_request, reason}}
+  end
+
+  defp maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt) do
+    if rate_limited_body?(body) and attempt < @rate_limit_max_retries do
+      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+    else
+      {:ok, body}
+    end
+  end
+
+  defp maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, attempt) do
+    if rate_limited_body?(response.body) and attempt < @rate_limit_max_retries do
+      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+    else
+      log_and_fail(payload, response)
     end
   end
 
@@ -212,6 +277,49 @@ defmodule SymphonyElixir.Linear.Client do
     else
       log_and_fail(payload, response)
     end
+  end
+
+  defp maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response) do
+    case Auth.fallback_api_key(token) do
+      {:ok, fallback_token} ->
+        Logger.warning("Linear auth failed; retrying request with bootstrap Linear auth")
+        retry_with_token(payload, request_fun, sleep_fun, attempt, fallback_token)
+
+      :none ->
+        log_and_fail(payload, response)
+    end
+  end
+
+  defp retry_with_token(payload, request_fun, sleep_fun, attempt, token) do
+    request_fun.(payload, graphql_headers_for_token(token))
+    |> handle_fallback_graphql_result(payload, request_fun, sleep_fun, attempt, token)
+  end
+
+  defp handle_fallback_graphql_result({:ok, %{status: 200, body: body}}, payload, request_fun, sleep_fun, attempt, token) do
+    Auth.put_runtime_api_key_override(token)
+    maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+  end
+
+  defp handle_fallback_graphql_result(
+         {:ok, %{status: status} = response},
+         payload,
+         request_fun,
+         sleep_fun,
+         attempt,
+         token
+       )
+       when status in [429] do
+    Auth.put_runtime_api_key_override(token)
+    maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
+  end
+
+  defp handle_fallback_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token) do
+    log_and_fail(payload, response)
+  end
+
+  defp handle_fallback_graphql_result({:error, reason}, _payload, _request_fun, _sleep_fun, _attempt, _token) do
+    Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+    {:error, {:linear_api_request, reason}}
   end
 
   defp backoff_and_retry(payload, request_fun, sleep_fun, attempt) do
@@ -433,18 +541,37 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp graphql_headers do
-    case Config.settings!().tracker.api_key do
-      nil ->
+    case Auth.runtime_api_key_override() || Auth.resolve_api_key(Config.settings!().tracker.api_key) do
+      {:error, :missing_linear_api_token} ->
         {:error, :missing_linear_api_token}
 
-      token ->
-        {:ok,
-         [
-           {"Authorization", token},
-           {"Content-Type", "application/json"}
-         ]}
+      token when is_binary(token) ->
+        {:ok, token, graphql_headers_for_token(token)}
+
+      {:ok, token} ->
+        {:ok, token, graphql_headers_for_token(token)}
     end
   end
+
+  defp graphql_headers_for_token(token) when is_binary(token) do
+    [
+      {"Authorization", token},
+      {"Content-Type", "application/json"}
+    ]
+  end
+
+  defp auth_configured?(configured_token) do
+    case Auth.resolve_api_key(configured_token) do
+      {:ok, _token} -> true
+      {:error, :missing_linear_api_token} -> false
+    end
+  end
+
+  defp auth_graphql_error?(%{"extensions" => %{"code" => code}}) when is_binary(code) do
+    code in ["AUTHENTICATION_ERROR", "UNAUTHENTICATED"]
+  end
+
+  defp auth_graphql_error?(_error), do: false
 
   defp post_graphql_request(payload, headers) do
     Req.post(Config.settings!().tracker.endpoint,

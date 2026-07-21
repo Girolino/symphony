@@ -6,9 +6,9 @@ defmodule SymphonyElixir.Linear.ClientTest do
   @ratelimited %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}
 
   setup do
-    write_workflow_file!(Path.join(System.tmp_dir!(), "client-test-#{System.unique_integer([:positive])}.md"),
-      tracker_api_token: "test-key"
-    )
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "test-key")
+
+    Application.delete_env(:symphony_elixir, :linear_api_key_override)
 
     :ok
   end
@@ -58,5 +58,49 @@ defmodule SymphonyElixir.Linear.ClientTest do
              Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
 
     assert Agent.get(counter, & &1) == 1
+  end
+
+  test "retries an auth failure once with bootstrap Linear auth" do
+    test_root = Path.join(System.tmp_dir!(), "linear-client-auth-#{System.unique_integer([:positive])}")
+    bootstrap_path = Path.join(test_root, "env")
+    previous_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
+
+    on_exit(fn ->
+      if is_nil(previous_bootstrap_path) do
+        Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+      else
+        Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, previous_bootstrap_path)
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(test_root)
+    File.write!(bootstrap_path, "LINEAR_API_KEY=bootstrap-key\n")
+    Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, bootstrap_path)
+
+    request_fun = fn _payload, headers ->
+      auth_header = List.keyfind(headers, "Authorization", 0)
+      send(self(), {:linear_auth_header, auth_header})
+
+      case auth_header do
+        {"Authorization", "test-key"} ->
+          {:ok,
+           %{
+             status: 401,
+             body: %{"errors" => [%{"extensions" => %{"code" => "AUTHENTICATION_ERROR"}}]}
+           }}
+
+        {"Authorization", "bootstrap-key"} ->
+          {:ok, %{status: 200, body: %{"data" => %{"viewer" => %{"id" => "viewer-1"}}}}}
+      end
+    end
+
+    assert {:ok, %{"data" => %{"viewer" => %{"id" => "viewer-1"}}}} =
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+
+    assert_receive {:linear_auth_header, {"Authorization", "test-key"}}
+    assert_receive {:linear_auth_header, {"Authorization", "bootstrap-key"}}
+    assert Application.get_env(:symphony_elixir, :linear_api_key_override) == "bootstrap-key"
   end
 end
