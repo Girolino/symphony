@@ -21,6 +21,17 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  defmodule AuthFailureLinearClient do
+    @spec fetch_candidate_issues() :: {:error, {:linear_api_status, 401}}
+    def fetch_candidate_issues, do: {:error, {:linear_api_status, 401}}
+
+    @spec fetch_issues_by_states([String.t()]) :: {:error, {:linear_api_status, 401}}
+    def fetch_issues_by_states(_states), do: {:error, {:linear_api_status, 401}}
+
+    @spec fetch_issue_states_by_ids([String.t()]) :: {:error, {:linear_api_status, 401}}
+    def fetch_issue_states_by_ids(_ids), do: {:error, {:linear_api_status, 401}}
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -703,6 +714,67 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-561",
              error: "agent exited: :boom"
            } = :sys.get_state(pid).retry_attempts[issue_id]
+  end
+
+  test "linear auth failure during continuation retry keeps the retry pending without advancing failures" do
+    previous_linear_client = Application.get_env(:symphony_elixir, :linear_client_module)
+
+    on_exit(fn ->
+      restore_app_env(:linear_client_module, previous_linear_client)
+    end)
+
+    Application.put_env(:symphony_elixir, :linear_client_module, AuthFailureLinearClient)
+
+    issue_id = "issue-auth-retry"
+    retry_token = make_ref()
+    now_ms = System.monotonic_time(:millisecond)
+
+    state = %Orchestrator.State{
+      retry_attempts: %{
+        issue_id => %{
+          attempt: 1,
+          failures: 0,
+          retry_token: retry_token,
+          due_at_ms: now_ms,
+          identifier: "MT-AUTH",
+          error: nil
+        }
+      },
+      completed: MapSet.new([issue_id]),
+      claimed: MapSet.new([issue_id])
+    }
+
+    retry_window_started_at_ms = System.monotonic_time(:millisecond)
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, updated_state} =
+                 Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+
+        send(self(), {:updated_state, updated_state})
+      end)
+
+    assert_receive {:updated_state, updated_state}
+    assert log =~ "Retry poll failed"
+    assert log =~ "linear_api_status, 401"
+
+    assert %{
+             attempt: 2,
+             failures: 0,
+             due_at_ms: due_at_ms,
+             error: error,
+             timer_ref: timer_ref
+           } = updated_state.retry_attempts[issue_id]
+
+    assert is_reference(timer_ref)
+    Process.cancel_timer(timer_ref)
+    assert is_integer(due_at_ms)
+    assert_due_in_range(due_at_ms, retry_window_started_at_ms, 19_000, 21_000)
+    assert error =~ "retry poll failed: {:linear_api_status, 401}"
+    assert MapSet.member?(updated_state.completed, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.running == %{}
+    assert updated_state.parked == %{}
   end
 
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do

@@ -172,7 +172,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - LiveView for the dashboard at `/`
 - JSON API for operational debugging under `/api/v1/*`
 - ETS-backed last-known-good snapshots so dashboard and API reads do not contend with tracker and worker messages in the orchestrator mailbox
-- State responses include snapshot age, orchestrator liveness, mailbox depth, and poll-busy health under `health`
+- State responses include poll countdown and last poll error under `polling`, plus snapshot age, orchestrator liveness, mailbox depth, and poll-busy health under `health`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 

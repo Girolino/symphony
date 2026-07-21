@@ -166,7 +166,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive :poll, 5_000
 
     Workflow.set_workflow_file_path(manual_path)
-    File.rm!(manual_path)
+    File.rm(manual_path)
     assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
     assert removed_state.workflow.prompt == "Manual workflow prompt"
     assert_receive :poll, 5_000
@@ -391,7 +391,13 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling" => %{
+               "checking?" => false,
+               "next_poll_in_ms" => 2_000,
+               "poll_interval_ms" => 30_000,
+               "last_error" => nil
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -771,7 +777,8 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      polling: %{checking?: false, next_poll_in_ms: 2_000, poll_interval_ms: 30_000, last_error: nil}
     }
   end
 

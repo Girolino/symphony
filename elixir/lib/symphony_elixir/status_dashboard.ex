@@ -336,6 +336,7 @@ defmodule SymphonyElixir.StatusDashboard do
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
+        project_poll_error_lines = format_poll_error_lines(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
@@ -365,6 +366,7 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
+           project_poll_error_lines,
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -426,6 +428,26 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_project_refresh_line(_) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
   end
+
+  defp format_poll_error_lines(%{last_error: %{message: message, operation: operation} = error})
+       when is_binary(message) and is_binary(operation) do
+    status =
+      case Map.get(error, :status) do
+        status when is_integer(status) -> " status=#{status}"
+        _ -> ""
+      end
+
+    [
+      colorize("│ Last poll error: ", @ansi_bold) <>
+        colorize(truncate("#{operation}#{status}: #{message}", 120), @ansi_red)
+    ]
+  end
+
+  defp format_poll_error_lines(%{last_error: %{message: message}}) when is_binary(message) do
+    [colorize("│ Last poll error: ", @ansi_bold) <> colorize(truncate(message, 120), @ansi_red)]
+  end
+
+  defp format_poll_error_lines(_polling), do: []
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
