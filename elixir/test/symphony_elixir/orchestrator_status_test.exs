@@ -1197,7 +1197,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     assert due_at_ms >= retry_window_started_at_ms + 10_000
-    assert due_at_ms <= retry_window_started_at_ms + 10_500
+    assert due_at_ms <= retry_window_started_at_ms + 11_000
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do

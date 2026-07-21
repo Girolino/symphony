@@ -303,7 +303,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, issues} ->
         maybe_choose_issues(issues, clear_linear_auth_failure(state))
 
-      {:error, reason} -> record_candidate_fetch_error(state, reason)
+      {:error, reason} ->
+        record_candidate_fetch_error(state, reason)
     end
   end
 
