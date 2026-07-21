@@ -130,6 +130,13 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, _refreshed_issue} ->
           :ok
 
+        {:defer, reason} ->
+          Logger.warning(
+            "post-turn issue-state refresh failed for #{issue_context(issue)} session_id=#{turn_session[:session_id]}: #{inspect(reason)}; returning control to orchestrator continuation retry"
+          )
+
+          :ok
+
         {:error, reason} ->
           {:error, reason}
       end
@@ -200,6 +207,9 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:ok, []} ->
         {:done, issue}
+
+      {:error, {:linear_api_status, _status} = reason} ->
+        {:defer, reason}
 
       {:error, reason} ->
         {:error, {:issue_state_refresh_failed, reason}}

@@ -1486,6 +1486,92 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner does not crash completed turns when Linear auth fails during state refresh" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-auth-refresh-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-auth-refresh.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_AUTH_REFRESH_TRACE:-/tmp/codex-auth-refresh.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-auth-refresh"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-auth-refresh"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_AUTH_REFRESH_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_AUTH_REFRESH_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :issue_state_refresh)
+        {:error, {:linear_api_status, 401}}
+      end
+
+      issue = %Issue{
+        id: "issue-auth-refresh",
+        identifier: "MT-AUTH-REFRESH",
+        title: "Completed turn auth refresh",
+        description: "Linear auth fails after a completed turn",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-AUTH-REFRESH",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        end)
+
+      assert_receive :issue_state_refresh
+      assert log =~ "post-turn issue-state refresh failed"
+      assert log =~ "session_id=thread-auth-refresh-turn-auth-refresh"
+      assert log =~ "linear_api_status, 401"
+    after
+      System.delete_env("SYMP_TEST_CODEX_AUTH_REFRESH_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner stops continuing once agent.max_turns is reached" do
     test_root =
       Path.join(
