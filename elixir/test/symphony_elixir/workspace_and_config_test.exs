@@ -929,7 +929,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     previous_api_key = System.get_env(api_key_env_var)
 
     System.put_env(workspace_env_var, workspace_root)
-    System.put_env(api_key_env_var, api_key)
+    System.put_env(api_key_env_var, "  #{api_key}\n")
 
     on_exit(fn ->
       restore_env(workspace_env_var, previous_workspace_root)
@@ -1048,7 +1048,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     System.delete_env(missing_workspace_env)
     System.put_env(empty_secret_env, "")
     System.delete_env(missing_secret_env)
-    System.put_env("LINEAR_API_KEY", "fallback-linear-token")
+    System.put_env("LINEAR_API_KEY", " fallback-linear-token\n")
 
     on_exit(fn ->
       restore_env(missing_workspace_env, previous_missing_workspace_env)

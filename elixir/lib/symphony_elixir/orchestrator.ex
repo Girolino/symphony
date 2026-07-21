@@ -45,6 +45,7 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_timer_ref,
       :tick_token,
       :codex_snapshot_publish_token,
+      :last_poll_error,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -277,57 +278,40 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state =
       state
+      |> clear_poll_error()
       |> reconcile_running_issues()
       |> expire_stale_blocked()
       |> reconcile_blocked_issues()
       |> reconcile_parked_issues()
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
+    case Config.validate!() do
+      :ok ->
+        fetch_and_choose_candidate_issues(state)
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
-        state
+        log_poll_error(reason)
+        record_poll_error(state, :config_validation, reason)
     end
+  end
+
+  defp fetch_and_choose_candidate_issues(%State{} = state) do
+    case Tracker.fetch_candidate_issues() do
+      {:ok, issues} -> maybe_choose_issues(issues, state)
+      {:error, reason} -> record_candidate_fetch_error(state, reason)
+    end
+  end
+
+  defp maybe_choose_issues(issues, %State{} = state) do
+    if available_slots(state) > 0 do
+      choose_issues(issues, state)
+    else
+      state
+    end
+  end
+
+  defp record_candidate_fetch_error(%State{} = state, reason) do
+    log_poll_error(reason)
+    record_poll_error(state, :candidate_fetch, reason)
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -350,7 +334,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
 
-          state
+          record_poll_error(state, :running_issue_refresh, reason)
       end
     end
   end
@@ -374,7 +358,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} ->
           Logger.debug("Failed to refresh blocked issue states: #{inspect(reason)}; keeping blocked issues")
 
-          state
+          record_poll_error(state, :blocked_issue_refresh, reason)
       end
     end
   end
@@ -588,23 +572,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    if map_size(state.running) == 0 do
+      state
+    else
+      case Config.settings() do
+        {:ok, config} ->
+          restart_stalled_running_issues(state, config.codex.stall_timeout_ms)
 
-    cond do
-      timeout_ms <= 0 ->
-        state
-
-      map_size(state.running) == 0 ->
-        state
-
-      true ->
-        now = DateTime.utc_now()
-
-        Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
-        end)
+        {:error, reason} ->
+          record_poll_error(state, :runtime_config, reason)
+      end
     end
   end
+
+  defp restart_stalled_running_issues(%State{} = state, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+    now = DateTime.utc_now()
+
+    Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+      maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
+    end)
+  end
+
+  defp restart_stalled_running_issues(%State{} = state, _timeout_ms), do: state
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     if Map.has_key?(state.blocked, issue_id) do
@@ -914,15 +903,31 @@ defmodule SymphonyElixir.Orchestrator do
     String.downcase(String.trim(state_name))
   end
 
+  @spec terminal_state_set() :: MapSet.t(String.t())
   defp terminal_state_set do
-    Config.settings!().tracker.terminal_states
-    |> Enum.map(&normalize_issue_state/1)
-    |> Enum.filter(&(&1 != ""))
-    |> MapSet.new()
+    case Config.settings() do
+      {:ok, settings} ->
+        build_state_set(settings.tracker.terminal_states)
+
+      {:error, _reason} ->
+        build_state_set([])
+    end
   end
 
+  @spec active_state_set() :: MapSet.t(String.t())
   defp active_state_set do
-    Config.settings!().tracker.active_states
+    case Config.settings() do
+      {:ok, settings} ->
+        build_state_set(settings.tracker.active_states)
+
+      {:error, _reason} ->
+        build_state_set([])
+    end
+  end
+
+  @spec build_state_set([String.t()]) :: MapSet.t(String.t())
+  defp build_state_set(states) when is_list(states) do
+    states
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
@@ -944,7 +949,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        record_poll_error(state, :dispatch_revalidation, reason)
     end
   end
 
@@ -1201,7 +1206,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Parked reconciliation failed: #{inspect(reason)}")
-        state
+        record_poll_error(state, :parked_issue_refresh, reason)
     end
   end
 
@@ -1224,36 +1229,46 @@ defmodule SymphonyElixir.Orchestrator do
   # retry path instead of waiting forever. Repeated block/expire cycles
   # increment attempts and eventually trip the breaker.
   defp expire_stale_blocked(%State{} = state) do
-    case Config.settings!().agent.blocked_max_age_ms do
-      max_age when is_integer(max_age) and max_age > 0 ->
-        now = DateTime.utc_now()
+    if map_size(state.blocked) == 0 do
+      state
+    else
+      case Config.settings() do
+        {:ok, config} ->
+          expire_stale_blocked(state, config.agent.blocked_max_age_ms)
 
-        state.blocked
-        |> Enum.filter(fn {_id, entry} ->
-          DateTime.diff(now, Map.get(entry, :blocked_at) || now, :millisecond) > max_age
-        end)
-        |> Enum.reduce(state, fn {issue_id, entry}, acc ->
-          Logger.warning("Liveness: blocked issue_id=#{issue_id} issue_identifier=#{entry.identifier} exceeded #{max_age}ms; retrying")
-
-          acc = %{
-            acc
-            | blocked: Map.delete(acc.blocked, issue_id),
-              claimed: MapSet.delete(acc.claimed, issue_id)
-          }
-
-          schedule_issue_retry(acc, issue_id, nil, %{
-            identifier: entry.identifier,
-            error: "liveness: blocked longer than #{max_age}ms",
-            carry_failures: Map.get(entry, :failures, 0),
-            worker_host: Map.get(entry, :worker_host),
-            workspace_path: Map.get(entry, :workspace_path)
-          })
-        end)
-
-      _ ->
-        state
+        {:error, reason} ->
+          record_poll_error(state, :runtime_config, reason)
+      end
     end
   end
+
+  defp expire_stale_blocked(%State{} = state, max_age) when is_integer(max_age) and max_age > 0 do
+    now = DateTime.utc_now()
+
+    state.blocked
+    |> Enum.filter(fn {_id, entry} ->
+      DateTime.diff(now, Map.get(entry, :blocked_at) || now, :millisecond) > max_age
+    end)
+    |> Enum.reduce(state, fn {issue_id, entry}, acc ->
+      Logger.warning("Liveness: blocked issue_id=#{issue_id} issue_identifier=#{entry.identifier} exceeded #{max_age}ms; retrying")
+
+      acc = %{
+        acc
+        | blocked: Map.delete(acc.blocked, issue_id),
+          claimed: MapSet.delete(acc.claimed, issue_id)
+      }
+
+      schedule_issue_retry(acc, issue_id, nil, %{
+        identifier: entry.identifier,
+        error: "liveness: blocked longer than #{max_age}ms",
+        carry_failures: Map.get(entry, :failures, 0),
+        worker_host: Map.get(entry, :worker_host),
+        workspace_path: Map.get(entry, :workspace_path)
+      })
+    end)
+  end
+
+  defp expire_stale_blocked(%State{} = state, _max_age), do: state
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
@@ -1646,10 +1661,69 @@ defmodule SymphonyElixir.Orchestrator do
       polling: %{
         checking?: state.poll_check_in_progress == true,
         next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
-        poll_interval_ms: state.poll_interval_ms
+        poll_interval_ms: state.poll_interval_ms,
+        last_error: state.last_poll_error
       }
     }
   end
+
+  defp clear_poll_error(%State{} = state), do: %{state | last_poll_error: nil}
+
+  defp record_poll_error(%State{} = state, operation, reason) do
+    %{state | last_poll_error: poll_error(operation, reason)}
+  end
+
+  defp poll_error(operation, {:linear_api_status, status}) when is_integer(status) do
+    %{
+      operation: to_string(operation),
+      code: "linear_api_status",
+      status: status,
+      message: "Linear GraphQL request failed with HTTP #{status}; dispatch paused for this poll.",
+      reason: inspect({:linear_api_status, status}),
+      occurred_at: DateTime.utc_now()
+    }
+  end
+
+  defp poll_error(operation, reason) do
+    %{
+      operation: to_string(operation),
+      code: poll_error_code(reason),
+      message: "Tracker poll failed; dispatch paused for this poll.",
+      reason: inspect(reason),
+      occurred_at: DateTime.utc_now()
+    }
+  end
+
+  defp poll_error_code(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp poll_error_code({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp poll_error_code({reason, _detail, _extra}) when is_atom(reason), do: Atom.to_string(reason)
+  defp poll_error_code(_reason), do: "tracker_poll_error"
+
+  defp log_poll_error(:missing_linear_api_token), do: Logger.error("Linear API token missing in WORKFLOW.md")
+  defp log_poll_error(:missing_linear_project_slug), do: Logger.error("Linear project slug missing in WORKFLOW.md")
+  defp log_poll_error(:missing_tracker_kind), do: Logger.error("Tracker kind missing in WORKFLOW.md")
+
+  defp log_poll_error({:unsupported_tracker_kind, kind}) do
+    Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+  end
+
+  defp log_poll_error({:invalid_workflow_config, message}) do
+    Logger.error("Invalid WORKFLOW.md config: #{message}")
+  end
+
+  defp log_poll_error({:missing_workflow_file, path, reason}) do
+    Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+  end
+
+  defp log_poll_error(:workflow_front_matter_not_a_map) do
+    Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+  end
+
+  defp log_poll_error({:workflow_parse_error, reason}) do
+    Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+  end
+
+  defp log_poll_error(reason), do: Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
 
   defp snapshot_from_server(server, timeout) do
     if GenServer.whereis(server) do
@@ -1825,13 +1899,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_session_completion_totals(state, _running_entry), do: state
 
   defp refresh_runtime_config(%State{} = state) do
-    config = Config.settings!()
+    case Config.settings() do
+      {:ok, config} ->
+        %{
+          state
+          | poll_interval_ms: config.polling.interval_ms,
+            max_concurrent_agents: config.agent.max_concurrent_agents
+        }
 
-    %{
-      state
-      | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents
-    }
+      {:error, reason} ->
+        record_poll_error(state, :runtime_config, reason)
+    end
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
