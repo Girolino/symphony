@@ -209,13 +209,9 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, []} ->
         {:done, issue}
 
-      {:error, {:linear_api_status, _status} = reason} ->
-        {:defer, reason}
-
       {:error, reason} ->
         if Client.auth_failure?(reason) do
-          Logger.error("Issue state refresh auth failed for #{issue_context(issue)} after completed turn: #{inspect(reason)}")
-          {:done, issue}
+          {:defer, reason}
         else
           {:error, {:issue_state_refresh_failed, reason}}
         end

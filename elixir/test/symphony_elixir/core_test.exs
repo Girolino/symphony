@@ -1172,8 +1172,10 @@ defmodule SymphonyElixir.CoreTest do
                    )
         end)
 
-      assert log =~ "Issue state refresh auth failed"
+      assert log =~ "post-turn issue-state refresh failed"
       assert log =~ "issue_identifier=#{issue.identifier}"
+      assert log =~ "session_id=thread-refresh-turn-refresh"
+      assert log =~ "linear_api_status, 401"
     end)
   end
 
