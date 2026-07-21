@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.{
     AgentRunner,
     Config,
+    Linear.Client,
     MetricsLedger,
     OrchestratorSnapshotStore,
     StatusDashboard,
@@ -53,7 +54,8 @@ defmodule SymphonyElixir.Orchestrator do
       parked: %{},
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      linear_auth_failure_reported: false
     ]
   end
 
@@ -289,6 +291,8 @@ defmodule SymphonyElixir.Orchestrator do
         fetch_and_choose_candidate_issues(state)
 
       {:error, reason} ->
+        state = maybe_file_linear_auth_ops_issue(state, reason)
+
         log_poll_error(reason)
         record_poll_error(state, :config_validation, reason)
     end
@@ -296,8 +300,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp fetch_and_choose_candidate_issues(%State{} = state) do
     case Tracker.fetch_candidate_issues() do
-      {:ok, issues} -> maybe_choose_issues(issues, state)
-      {:error, reason} -> record_candidate_fetch_error(state, reason)
+      {:ok, issues} ->
+        maybe_choose_issues(issues, clear_linear_auth_failure(state))
+
+      {:error, reason} ->
+        record_candidate_fetch_error(state, reason)
     end
   end
 
@@ -310,6 +317,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_candidate_fetch_error(%State{} = state, reason) do
+    state = maybe_file_linear_auth_ops_issue(state, reason)
+
     log_poll_error(reason)
     record_poll_error(state, :candidate_fetch, reason)
   end
@@ -1151,40 +1160,65 @@ defmodule SymphonyElixir.Orchestrator do
         "The lane circuit breaker parked #{identifier} after #{failures} consecutive failed runs. " <>
           "Last error: #{error}. Investigate the failure class; the issue stays parked until the daemon restarts or this is resolved."
 
-      file_parked_ops_issue_with_retry(title, body)
+      file_ops_issue_with_retry("Breaker", title, body)
     end)
   end
+
+  defp file_linear_auth_ops_issue(reason) do
+    Task.start(fn ->
+      title = "daemon Linear auth failure"
+
+      body =
+        "The Symphony daemon could not authenticate to Linear before dispatch. " <>
+          "Reason: #{inspect(reason)}. Worker dispatch is paused for this poll so completed Codex turns do not crash during issue-state refresh."
+
+      file_ops_issue_with_retry("Linear auth", title, body)
+    end)
+  end
+
+  defp maybe_file_linear_auth_ops_issue(%State{linear_auth_failure_reported: true} = state, _reason), do: state
+
+  defp maybe_file_linear_auth_ops_issue(%State{} = state, reason) do
+    if Client.auth_failure?(reason) do
+      file_linear_auth_ops_issue(reason)
+      %{state | linear_auth_failure_reported: true}
+    else
+      state
+    end
+  end
+
+  defp clear_linear_auth_failure(%State{} = state), do: %{state | linear_auth_failure_reported: false}
 
   defp ops_issue_filer do
     Application.get_env(:symphony_elixir, :ops_issue_filer, SymphonyElixir.OpsIssue)
   end
 
-  defp file_parked_ops_issue_with_retry(title, body) do
+  defp file_ops_issue_with_retry(context, title, body) do
     case ops_issue_filer().file(title, body, []) do
       {:created, issue} ->
-        Logger.warning("Breaker ops issue created: #{issue["identifier"]}")
+        Logger.warning("#{context} ops issue created: #{issue["identifier"]}")
 
       {:existing, issue} ->
-        Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
+        Logger.warning("#{context} ops issue already open: #{issue["identifier"]}")
 
       {:error, first_reason} ->
         Process.sleep(30_000)
-        file_parked_ops_issue_final(title, body, first_reason)
+        file_ops_issue_final(context, title, body, first_reason)
     end
   end
 
-  defp file_parked_ops_issue_final(title, body, first_reason) do
+  defp file_ops_issue_final(context, title, body, first_reason) do
     case ops_issue_filer().file(title, body, []) do
       {:created, issue} ->
-        Logger.warning("Breaker ops issue created on retry: #{issue["identifier"]}")
+        Logger.warning("#{context} ops issue created on retry: #{issue["identifier"]}")
 
       {:existing, issue} ->
-        Logger.warning("Breaker ops issue already open: #{issue["identifier"]}")
+        Logger.warning("#{context} ops issue already open: #{issue["identifier"]}")
 
       {:error, reason} ->
         # Accepted residual: no durable pending record; the park stays visible
         # in logs and the issue re-parks after restart.
-        Logger.error("Breaker ops issue filing FAILED twice (C4 risk): first=#{inspect(first_reason)} then=#{inspect(reason)}")
+        Logger.error("#{context} ops issue filing FAILED twice (C4 risk): first=#{inspect(first_reason)} then=#{inspect(reason)}")
     end
   end
 
