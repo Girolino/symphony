@@ -301,7 +301,31 @@ Rules:
 - If a key was pasted into chat or logs, rotate it.
 - Normalize malformed key files before debugging the scripts. A split or copied token can cause
   confusing `401` failures.
+- Treat `LINEAR_API_KEY` from the daemon environment as the primary credential. When the scheduled
+  daemon has no process env key, `scripts/lane-daemon.sh` loads `~/.config/linear-codex/env`, and
+  `scripts/credential-probe.sh` validates that same file-backed key as primary auth. If an explicit
+  process env primary fails while the file-backed key is healthy, the file-backed key can still file
+  the blocker.
 - Keep Linear issue/project writes in operator automation, not the app runtime.
+
+Repo-local credential validation and rotation automation:
+
+```bash
+cd elixir
+mise exec -- mix linear.rotate_credential --check-primary
+mise exec -- mix linear.rotate_credential --check-primary-file ~/.config/linear-codex/env
+mise exec -- mix linear.rotate_credential --candidate-file <candidate-env-file> --primary-file ~/.config/linear-codex/env
+```
+
+From the repo root, `scripts/linear-credential-rotation.sh` forwards the same arguments to the Mix
+task.
+
+`--check-primary` validates only the live `LINEAR_API_KEY` environment variable and does not use
+the file fallback. `--check-primary-file` validates the file-backed primary source used by the
+scheduled daemon. Rotation validates the candidate with Linear, writes the primary env file
+atomically, revalidates the installed primary file, and restores the previous primary file if that
+final validation fails. The command reports credential names and status only; values must never
+appear in output, workpads, issues, or reports.
 
 ## Repo-Owned `WORKFLOW.md`
 
@@ -755,6 +779,8 @@ Cause:
 Fix:
 
 - Check `LINEAR_API_KEY` or `~/.config/linear-codex/env`.
+- After rotating the primary credential, run `scripts/credential-probe.sh`; a pass proves primary
+  auth worked through the daemon's configured source.
 - Do not print the value.
 - Rotate any exposed key.
 
