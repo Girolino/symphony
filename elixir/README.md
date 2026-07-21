@@ -37,6 +37,8 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
+   - `LINEAR_API_KEY` is the primary credential. The repo-owned `scripts/credential-probe.sh`
+     validates it directly and does not treat the bootstrap file as a primary-auth pass.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
@@ -196,6 +198,20 @@ cd elixir
 export LINEAR_API_KEY=...
 make e2e
 ```
+
+To validate or rotate the persisted Linear credential without printing values:
+
+```bash
+cd elixir
+mise exec -- mix linear.rotate_credential --check-primary
+mise exec -- mix linear.rotate_credential --candidate-file <candidate-env-file>
+```
+
+The repo-root `scripts/linear-credential-rotation.sh` wrapper forwards the same arguments.
+
+`--check-primary` validates only the live `LINEAR_API_KEY` environment variable, without consulting
+the bootstrap file fallback. The rotation mode validates the candidate, writes the primary env file
+atomically, then validates the installed primary file.
 
 Optional environment variables:
 
