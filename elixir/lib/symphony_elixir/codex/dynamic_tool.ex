@@ -47,6 +47,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     [
       %{
         "name" => @linear_graphql_tool,
+        "type" => "function",
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
       }

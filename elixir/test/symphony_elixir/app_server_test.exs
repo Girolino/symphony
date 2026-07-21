@@ -497,7 +497,8 @@ defmodule SymphonyElixir.AppServerTest do
                        %{
                          "description" => description,
                          "inputSchema" => %{"required" => ["query"]},
-                         "name" => "linear_graphql"
+                         "name" => "linear_graphql",
+                         "type" => "function"
                        }
                      ] ->
                        description =~ "Linear"
