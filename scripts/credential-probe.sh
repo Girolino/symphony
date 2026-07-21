@@ -10,23 +10,80 @@ export SYMPHONY_OPS_TEAM_KEY="${SYMPHONY_OPS_TEAM_KEY:-SYM}"
 export SYMPHONY_OPS_PROJECT_SLUG="${SYMPHONY_OPS_PROJECT_SLUG:-3c60ffa59268}"
 
 failures=()
-temp_headers=()
+temp_files=()
 
-cleanup_headers() {
-  for hdr in "${temp_headers[@]}"; do
-    [ -n "$hdr" ] && rm -f "$hdr"
+cleanup_temp_files() {
+  for tmp in "${temp_files[@]}"; do
+    [ -n "$tmp" ] && rm -f "$tmp"
   done
 }
-trap cleanup_headers EXIT
+trap cleanup_temp_files EXIT
 
 KEY_FILE="$HOME/.config/linear-codex/env"
+
+read_linear_key_file() {
+  local path="$1"
+
+  sed -n 's/^LINEAR_API_KEY=//p' "$path" 2>/dev/null | head -1 | tr -d '"' | tr -d "'"
+}
+
+FILE_KEY="$(read_linear_key_file "$KEY_FILE")"
 PRIMARY_KEY="${LINEAR_API_KEY:-}"
-BOOTSTRAP_KEY="$(sed -n 's/^LINEAR_API_KEY=//p' "$KEY_FILE" 2>/dev/null | head -1 | tr -d '"' | tr -d "'")"
+PRIMARY_LABEL="LINEAR_API_KEY primary"
+BOOTSTRAP_KEY=""
+BOOTSTRAP_LABEL="LINEAR_API_KEY bootstrap file $KEY_FILE"
+
+# The scheduled LaunchAgent mirrors scripts/lane-daemon.sh: it may provide only
+# PATH, while the daemon resolves LINEAR_API_KEY from the configured env file.
+if [ -z "$PRIMARY_KEY" ] && [ -n "$FILE_KEY" ]; then
+  PRIMARY_KEY="$FILE_KEY"
+  PRIMARY_LABEL="LINEAR_API_KEY primary file $KEY_FILE"
+elif [ -n "$FILE_KEY" ]; then
+  BOOTSTRAP_KEY="$FILE_KEY"
+fi
+
+parse_linear_viewer_payload() {
+  local body_file="$1"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "JSON parser unavailable"
+    return 1
+  fi
+
+  python3 - "$body_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    print("invalid JSON")
+    sys.exit(1)
+
+errors = payload.get("errors")
+if isinstance(errors, list) and errors:
+    print("GraphQL errors")
+    sys.exit(1)
+
+data = payload.get("data")
+viewer = data.get("viewer") if isinstance(data, dict) else None
+viewer_id = viewer.get("id") if isinstance(viewer, dict) else None
+
+if not isinstance(viewer_id, str) or not viewer_id.strip():
+    print("missing viewer id")
+    sys.exit(1)
+
+print("ok")
+PY
+}
 
 check_linear_key() {
   local label="$1"
   local key="$2"
   local hdr
+  local body_file
+  local payload_status
   local status
 
   if [ -z "$key" ]; then
@@ -39,27 +96,41 @@ check_linear_key() {
     failures+=("$label validation failed (temporary header unavailable)")
     return 1
   }
-  temp_headers+=("$hdr")
+  temp_files+=("$hdr")
   chmod 600 "$hdr"
   printf 'Authorization: %s\n' "$key" > "$hdr"
 
-  status="$(curl -s -o /dev/null -w "%{http_code}" -m 10 \
+  body_file="$(mktemp 2>/dev/null)" || {
+    failures+=("$label validation failed (temporary body unavailable)")
+    return 1
+  }
+  temp_files+=("$body_file")
+
+  status="$(curl -sS -w "%{http_code}" -o "$body_file" -m 10 \
     -H @"$hdr" -H "Content-Type: application/json" \
     -d '{"query":"query { viewer { id } }"}' https://api.linear.app/graphql 2>/dev/null)"
   status="${status:-000}"
 
-  if [ "$status" = "200" ]; then
+  if [ "$status" != "200" ]; then
+    failures+=("$label invalid (viewer query returned HTTP $status)")
+    return 1
+  fi
+
+  payload_status="$(parse_linear_viewer_payload "$body_file")"
+  if [ "$payload_status" = "ok" ]; then
     return 0
   fi
 
-  failures+=("$label invalid (viewer query returned $status)")
+  failures+=("$label invalid (viewer query returned $payload_status)")
   return 1
 }
 
 primary_ok=0
 bootstrap_ok=0
-check_linear_key "LINEAR_API_KEY primary" "$PRIMARY_KEY" && primary_ok=1
-check_linear_key "LINEAR_API_KEY bootstrap file $KEY_FILE" "$BOOTSTRAP_KEY" && bootstrap_ok=1
+check_linear_key "$PRIMARY_LABEL" "$PRIMARY_KEY" && primary_ok=1
+if [ -n "$BOOTSTRAP_KEY" ]; then
+  check_linear_key "$BOOTSTRAP_LABEL" "$BOOTSTRAP_KEY" && bootstrap_ok=1
+fi
 
 if ! gh auth status >/dev/null 2>&1; then
   failures+=("gh auth status failed (GitHub credential)")

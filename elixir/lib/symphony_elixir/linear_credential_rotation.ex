@@ -9,7 +9,8 @@ defmodule SymphonyElixir.LinearCredentialRotation do
 
   Rotation accepts a candidate env file, validates the candidate with Linear's
   viewer query, writes the primary env file atomically, then validates the
-  installed primary file. Credential values are never returned or logged.
+  installed primary file. If installed-file validation fails, the previous
+  primary file is restored. Credential values are never returned or logged.
   """
 
   alias SymphonyElixir.{OpsTransport, ProdSmoke}
@@ -69,8 +70,12 @@ defmodule SymphonyElixir.LinearCredentialRotation do
       when is_binary(candidate_path) and is_binary(primary_path) do
     with {:ok, candidate_key} <- read_key_file(candidate_path),
          :ok <- validate_key(candidate_key, opts, :candidate),
+         {:ok, previous_primary} <- snapshot_primary_file(primary_path),
          :ok <- write_primary_file(primary_path, candidate_key) do
-      check_primary_file(primary_path, opts)
+      case check_primary_file(primary_path, opts) do
+        :ok -> :ok
+        {:error, reason} -> restore_after_failed_install(primary_path, previous_primary, reason)
+      end
     end
   end
 
@@ -113,6 +118,58 @@ defmodule SymphonyElixir.LinearCredentialRotation do
 
   defp normalize_transport_error({:linear_api_request, _reason}), do: :linear_api_request
   defp normalize_transport_error(_reason), do: :linear_api_request
+
+  defp snapshot_primary_file(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        {:ok, {:existing, contents, file_mode(path)}}
+
+      {:error, :enoent} ->
+        {:ok, :missing}
+
+      {:error, reason} ->
+        {:error, {:read_primary_file_failed, reason}}
+    end
+  end
+
+  defp file_mode(path) do
+    case File.stat(path) do
+      {:ok, stat} -> Bitwise.band(stat.mode, 0o777)
+      {:error, _reason} -> 0o600
+    end
+  end
+
+  defp restore_after_failed_install(path, previous_primary, validation_reason) do
+    case restore_primary_file(path, previous_primary) do
+      :ok -> {:error, validation_reason}
+      {:error, restore_reason} -> {:error, {:installed_primary_unverified, validation_reason, restore_reason}}
+    end
+  end
+
+  defp restore_primary_file(path, :missing) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:restore_primary_file_failed, reason}}
+    end
+  end
+
+  defp restore_primary_file(path, {:existing, contents, mode}) do
+    dir = Path.dirname(path)
+    tmp_path = Path.join(dir, ".#{Path.basename(path)}.restore.#{System.unique_integer([:positive])}.tmp")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(tmp_path, contents, [:write, :exclusive]),
+         :ok <- File.chmod(tmp_path, mode),
+         :ok <- File.rename(tmp_path, path),
+         :ok <- File.chmod(path, mode) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp_path)
+        {:error, {:restore_primary_file_failed, reason}}
+    end
+  end
 
   defp write_primary_file(path, key) do
     dir = Path.dirname(path)

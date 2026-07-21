@@ -10,10 +10,21 @@ defmodule SymphonyElixir.CredentialProbeScriptTest do
     {output, status} = run_probe(probe)
 
     assert status == 1
-    assert output =~ "LINEAR_API_KEY primary invalid (viewer query returned 418)"
+    assert output =~ "LINEAR_API_KEY primary invalid (viewer query returned HTTP 418)"
     refute output =~ probe.primary_token
     refute output =~ probe.bootstrap_token
     assert File.read!(probe.trace_file) =~ "linear_key_env=unset"
+  end
+
+  test "scheduled probe validates file-backed primary like the daemon" do
+    probe = probe_env(include_primary_env?: false, bootstrap_status: "200")
+
+    {output, status} = run_probe(probe)
+
+    assert status == 0
+    assert output =~ "credential probe: all capabilities valid (by name)"
+    refute output =~ probe.bootstrap_token
+    refute File.exists?(probe.trace_file)
   end
 
   test "passes when primary and bootstrap credentials validate" do
@@ -26,6 +37,40 @@ defmodule SymphonyElixir.CredentialProbeScriptTest do
     refute output =~ probe.primary_token
     refute output =~ probe.bootstrap_token
     refute File.exists?(probe.trace_file)
+  end
+
+  test "rejects HTTP 200 GraphQL auth errors" do
+    probe =
+      probe_env(
+        primary_status: "200",
+        primary_payload: ~s({"errors":[{"message":"Authentication required"}]}),
+        bootstrap_status: "200"
+      )
+
+    {output, status} = run_probe(probe)
+
+    assert status == 1
+    assert output =~ "LINEAR_API_KEY primary invalid (viewer query returned GraphQL errors)"
+    refute output =~ probe.primary_token
+    refute output =~ probe.bootstrap_token
+    assert File.read!(probe.trace_file) =~ "linear_key_env=unset"
+  end
+
+  test "rejects HTTP 200 payloads without a viewer id" do
+    probe =
+      probe_env(
+        primary_status: "200",
+        primary_payload: ~s({"data":{"viewer":{}}}),
+        bootstrap_status: "200"
+      )
+
+    {output, status} = run_probe(probe)
+
+    assert status == 1
+    assert output =~ "LINEAR_API_KEY primary invalid (viewer query returned missing viewer id)"
+    refute output =~ probe.primary_token
+    refute output =~ probe.bootstrap_token
+    assert File.read!(probe.trace_file) =~ "linear_key_env=unset"
   end
 
   defp run_probe(probe) do
@@ -54,20 +99,30 @@ defmodule SymphonyElixir.CredentialProbeScriptTest do
 
     on_exit(fn -> File.rm_rf(root) end)
 
+    env = [
+      {"HOME", home},
+      {"PATH", bin <> ":" <> System.get_env("PATH", "")},
+      {"PRIMARY_TOKEN", primary_token},
+      {"BOOTSTRAP_TOKEN", bootstrap_token},
+      {"PRIMARY_STATUS", Keyword.get(opts, :primary_status, "200")},
+      {"BOOTSTRAP_STATUS", Keyword.get(opts, :bootstrap_status, "200")},
+      {"PRIMARY_PAYLOAD", Keyword.get(opts, :primary_payload, viewer_payload())},
+      {"BOOTSTRAP_PAYLOAD", Keyword.get(opts, :bootstrap_payload, viewer_payload())},
+      {"TRACE_FILE", trace_file}
+    ]
+
+    env =
+      if Keyword.get(opts, :include_primary_env?, true) do
+        [{"LINEAR_API_KEY", primary_token} | env]
+      else
+        [{"LINEAR_API_KEY", nil} | env]
+      end
+
     %{
       primary_token: primary_token,
       bootstrap_token: bootstrap_token,
       trace_file: trace_file,
-      env: [
-        {"HOME", home},
-        {"PATH", bin <> ":" <> System.get_env("PATH", "")},
-        {"LINEAR_API_KEY", primary_token},
-        {"PRIMARY_TOKEN", primary_token},
-        {"BOOTSTRAP_TOKEN", bootstrap_token},
-        {"PRIMARY_STATUS", Keyword.fetch!(opts, :primary_status)},
-        {"BOOTSTRAP_STATUS", Keyword.fetch!(opts, :bootstrap_status)},
-        {"TRACE_FILE", trace_file}
-      ]
+      env: env
     }
   end
 
@@ -81,21 +136,42 @@ defmodule SymphonyElixir.CredentialProbeScriptTest do
     #!/usr/bin/env bash
     set -euo pipefail
     header=""
-    for arg in "$@"; do
-      case "$arg" in
-        @*) header="${arg#@}" ;;
+    output_file=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -H)
+          if [[ "${2:-}" == @* ]]; then
+            header="${2#@}"
+          fi
+          shift 2
+          ;;
+        -o)
+          output_file="${2:-}"
+          shift 2
+          ;;
+        -w|-m|-d)
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
       esac
     done
 
     if [ -n "$header" ] && grep -q "$PRIMARY_TOKEN" "$header"; then
+      printf '%s' "$PRIMARY_PAYLOAD" > "$output_file"
       printf '%s' "$PRIMARY_STATUS"
     elif [ -n "$header" ] && grep -q "$BOOTSTRAP_TOKEN" "$header"; then
+      printf '%s' "$BOOTSTRAP_PAYLOAD" > "$output_file"
       printf '%s' "$BOOTSTRAP_STATUS"
     else
+      printf '%s' '{"errors":[{"message":"Authentication required"}]}' > "$output_file"
       printf '401'
     fi
     """
   end
+
+  defp viewer_payload, do: ~s({"data":{"viewer":{"id":"viewer-1"}}})
 
   defp fake_gh do
     """

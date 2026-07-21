@@ -86,6 +86,36 @@ defmodule SymphonyElixir.LinearCredentialRotationTest do
     assert File.read!(primary_path) == "LINEAR_API_KEY=existing-primary-for-test\n"
   end
 
+  test "rotation restores previous primary file when installed validation fails" do
+    dir = tmp_dir()
+    candidate_path = Path.join(dir, "candidate.env")
+    primary_path = Path.join(dir, "primary.env")
+    File.write!(candidate_path, "LINEAR_API_KEY=candidate-key-for-test\n")
+    File.write!(primary_path, "LINEAR_API_KEY=existing-primary-for-test\n")
+    File.chmod!(primary_path, 0o600)
+    parent = self()
+    counter = start_supervised!({Agent, fn -> 0 end})
+
+    graphql_fun = fn _endpoint, key, _query, _variables ->
+      call_number = Agent.get_and_update(counter, fn count -> {count + 1, count + 1} end)
+      send(parent, {:validated, call_number, key})
+
+      case call_number do
+        1 -> {:ok, @viewer}
+        2 -> {:ok, %{"errors" => [%{"message" => "expired"}]}}
+      end
+    end
+
+    assert {:error, {:primary_file_invalid, :linear_graphql_errors}} =
+             LinearCredentialRotation.rotate_from_candidate_file(candidate_path, primary_path, graphql_fun: graphql_fun)
+
+    assert File.read!(primary_path) == "LINEAR_API_KEY=existing-primary-for-test\n"
+    assert {:ok, stat} = File.stat(primary_path)
+    assert Bitwise.band(stat.mode, 0o777) == 0o600
+    assert_received {:validated, 1, "candidate-key-for-test"}
+    assert_received {:validated, 2, "candidate-key-for-test"}
+  end
+
   test "GraphQL errors are redacted to a stable failure reason" do
     graphql_fun = fn _endpoint, _key, _query, _variables ->
       {:ok, %{"errors" => [%{"message" => "nope"}]}}

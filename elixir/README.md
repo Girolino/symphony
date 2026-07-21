@@ -37,9 +37,9 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings -> Security & access -> Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable or in `~/.config/linear-codex/env`.
-   - `LINEAR_API_KEY` from the daemon environment is the primary credential. The repo-owned
-     `scripts/credential-probe.sh` validates it directly and does not treat the bootstrap file as a
-     primary-auth pass.
+   - `LINEAR_API_KEY` from the daemon environment is the primary credential. When the daemon is
+     launched with the documented file-backed setup, the repo-owned `scripts/credential-probe.sh`
+     validates the same env file as the primary source.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
@@ -212,8 +212,10 @@ mise exec -- mix linear.rotate_credential --candidate-file <candidate-env-file>
 The repo-root `scripts/linear-credential-rotation.sh` wrapper forwards the same arguments.
 
 `--check-primary` validates only the live `LINEAR_API_KEY` environment variable, without consulting
-the bootstrap file fallback. The rotation mode validates the candidate, writes the primary env file
-atomically, then validates the installed primary file.
+the file fallback. The scheduled credential probe validates the file-backed primary source when no
+process env key is present, matching `scripts/lane-daemon.sh`. The rotation mode validates the
+candidate, writes the primary env file atomically, validates the installed primary file, and restores
+the previous primary file if that final validation fails.
 
 Optional environment variables:
 

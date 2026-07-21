@@ -15,7 +15,8 @@ defmodule Mix.Tasks.Linear.RotateCredential do
   variable. It does not use the bootstrap file fallback.
 
   Rotation validates the candidate env file against Linear, writes the primary
-  env file atomically, then validates the installed primary file.
+  env file atomically, then validates the installed primary file. If final
+  validation fails, the previous primary file is restored.
   """
   @shortdoc "Validates or rotates the Linear primary credential"
 
@@ -97,6 +98,10 @@ defmodule Mix.Tasks.Linear.RotateCredential do
 
   defp failure_message({:write_primary_file_failed, reason}) do
     "primary file write failed: #{inspect(reason)}"
+  end
+
+  defp failure_message({:installed_primary_unverified, validation_reason, restore_reason}) do
+    "installed primary validation failed and restore failed: #{inspect({validation_reason, restore_reason})}"
   end
 
   defp failure_message({tag, {:linear_api_status, status}})
