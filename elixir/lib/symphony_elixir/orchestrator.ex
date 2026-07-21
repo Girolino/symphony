@@ -285,9 +285,14 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_parked_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, %{state | linear_auth_failure_reported: false})
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state = %{state | linear_auth_failure_reported: false}
+
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -327,9 +332,6 @@ defmodule SymphonyElixir.Orchestrator do
         state = if Client.auth_failure?(reason), do: maybe_file_linear_auth_ops_issue(state, reason), else: state
 
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end

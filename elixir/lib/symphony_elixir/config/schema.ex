@@ -454,15 +454,24 @@ defmodule SymphonyElixir.Config.Schema do
   defp resolve_linear_api_key(value) when is_binary(value) do
     case env_reference_name(value) do
       {:ok, env_name} ->
-        case System.get_env(env_name) do
-          nil -> resolve_linear_api_key(nil)
-          "" -> nil
-          env_value -> normalize_secret_value(env_value)
-        end
+        resolve_linear_env_api_key(env_name)
 
       :error ->
         normalize_secret_value(value)
     end
+  end
+
+  defp resolve_linear_env_api_key("LINEAR_API_KEY") do
+    case System.get_env("LINEAR_API_KEY") |> normalize_secret_value() do
+      nil -> resolve_linear_api_key(nil)
+      env_value -> env_value
+    end
+  end
+
+  defp resolve_linear_env_api_key(env_name) do
+    env_name
+    |> System.get_env()
+    |> normalize_secret_value()
   end
 
   defp resolve_path_value(value, default) when is_binary(value) do

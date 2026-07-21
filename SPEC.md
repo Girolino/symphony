@@ -1155,8 +1155,8 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - `tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
-- HTTP 401 MAY trigger one retry with the documented local bootstrap credential when it differs
-  from the current configured token.
+- HTTP 401 or 403 MAY trigger one retry with the documented local bootstrap credential when it
+  differs from the current configured token.
 - `tracker.project_slug` maps to Linear project `slugId`
 - Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`

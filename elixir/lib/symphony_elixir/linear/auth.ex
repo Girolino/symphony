@@ -3,23 +3,19 @@ defmodule SymphonyElixir.Linear.Auth do
   Resolves Linear API credentials for daemon-side tracker calls.
   """
 
-  @default_bootstrap_path Path.join([System.user_home!(), ".config", "linear-codex", "env"])
-
   @spec default_bootstrap_path() :: String.t()
   def default_bootstrap_path do
-    Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path, @default_bootstrap_path)
+    Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path, compute_default_bootstrap_path())
   end
 
   @spec resolve_api_key(String.t() | nil, keyword()) :: {:ok, String.t()} | {:error, :missing_linear_api_token}
   def resolve_api_key(configured_token, opts \\ []) do
-    case runtime_api_key_override() do
-      token when is_binary(token) ->
-        {:ok, token}
+    case resolve_api_key_without_override(configured_token, opts) do
+      {:ok, token} ->
+        {:ok, runtime_api_key_override(token) || token}
 
-      nil ->
-        configured_token
-        |> normalize_secret_value()
-        |> fallback_to_env(opts)
+      {:error, :missing_linear_api_token} ->
+        {:error, :missing_linear_api_token}
     end
   end
 
@@ -31,16 +27,37 @@ defmodule SymphonyElixir.Linear.Auth do
     end
   end
 
-  @spec put_runtime_api_key_override(String.t()) :: :ok
-  def put_runtime_api_key_override(token) when is_binary(token) do
-    Application.put_env(:symphony_elixir, :linear_api_key_override, token)
+  @spec put_runtime_api_key_override(String.t(), String.t() | nil) :: :ok
+  def put_runtime_api_key_override(token, failed_token \\ nil) when is_binary(token) do
+    Application.put_env(:symphony_elixir, :linear_api_key_override, %{
+      token: normalize_secret_value(token),
+      failed_token: normalize_secret_value(failed_token)
+    })
+  end
+
+  @spec clear_runtime_api_key_override() :: :ok
+  def clear_runtime_api_key_override do
+    Application.delete_env(:symphony_elixir, :linear_api_key_override)
   end
 
   @spec runtime_api_key_override() :: String.t() | nil
   def runtime_api_key_override do
     :symphony_elixir
     |> Application.get_env(:linear_api_key_override)
-    |> normalize_secret_value()
+    |> runtime_override_token()
+  end
+
+  @spec runtime_api_key_override(String.t() | nil) :: String.t() | nil
+  def runtime_api_key_override(current_token) do
+    current = normalize_secret_value(current_token)
+
+    case Application.get_env(:symphony_elixir, :linear_api_key_override) do
+      %{token: token, failed_token: ^current} ->
+        normalize_secret_value(token)
+
+      _override ->
+        nil
+    end
   end
 
   @spec fallback_api_key(String.t() | nil, keyword()) :: {:ok, String.t()} | :none
@@ -119,5 +136,18 @@ defmodule SymphonyElixir.Linear.Auth do
       :bootstrap_path,
       default_bootstrap_path()
     )
+  end
+
+  defp resolve_api_key_without_override(configured_token, opts) do
+    configured_token
+    |> normalize_secret_value()
+    |> fallback_to_env(opts)
+  end
+
+  defp runtime_override_token(%{token: token}), do: normalize_secret_value(token)
+  defp runtime_override_token(token), do: normalize_secret_value(token)
+
+  defp compute_default_bootstrap_path do
+    Path.join([System.user_home!(), ".config", "linear-codex", "env"])
   end
 end

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, OpsIssue}
   alias SymphonyElixir.Linear.{Auth, Issue}
 
   @issue_page_size 50
@@ -221,8 +221,12 @@ defmodule SymphonyElixir.Linear.Client do
     |> handle_graphql_result(payload, request_fun, sleep_fun, attempt, token)
   end
 
-  defp handle_graphql_result({:ok, %{status: 200, body: body}}, payload, request_fun, sleep_fun, attempt, _token) do
-    maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+  defp handle_graphql_result({:ok, %{status: 200, body: body} = response}, payload, request_fun, sleep_fun, attempt, token) do
+    if auth_error_body?(body) do
+      maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response)
+    else
+      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+    end
   end
 
   defp handle_graphql_result(
@@ -283,21 +287,36 @@ defmodule SymphonyElixir.Linear.Client do
     case Auth.fallback_api_key(token) do
       {:ok, fallback_token} ->
         Logger.warning("Linear auth failed; retrying request with bootstrap Linear auth")
-        retry_with_token(payload, request_fun, sleep_fun, attempt, fallback_token)
+        retry_with_token(payload, request_fun, sleep_fun, attempt, fallback_token, token, response)
 
       :none ->
-        log_and_fail(payload, response)
+        Auth.clear_runtime_api_key_override()
+        log_auth_and_fail(payload, response)
     end
   end
 
-  defp retry_with_token(payload, request_fun, sleep_fun, attempt, token) do
+  defp retry_with_token(payload, request_fun, sleep_fun, attempt, token, failed_token, failure_response) do
     request_fun.(payload, graphql_headers_for_token(token))
-    |> handle_fallback_graphql_result(payload, request_fun, sleep_fun, attempt, token)
+    |> handle_fallback_graphql_result(payload, request_fun, sleep_fun, attempt, token, failed_token, failure_response)
   end
 
-  defp handle_fallback_graphql_result({:ok, %{status: 200, body: body}}, payload, request_fun, sleep_fun, attempt, token) do
-    Auth.put_runtime_api_key_override(token)
-    maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+  defp handle_fallback_graphql_result(
+         {:ok, %{status: 200, body: body}},
+         payload,
+         request_fun,
+         sleep_fun,
+         attempt,
+         token,
+         failed_token,
+         failure_response
+       ) do
+    if auth_error_body?(body) do
+      Auth.clear_runtime_api_key_override()
+      log_auth_and_fail(payload, %{status: 200, body: body})
+    else
+      promote_fallback_token(token, failed_token, failure_response)
+      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+    end
   end
 
   defp handle_fallback_graphql_result(
@@ -306,18 +325,22 @@ defmodule SymphonyElixir.Linear.Client do
          request_fun,
          sleep_fun,
          attempt,
-         token
+         token,
+         failed_token,
+         failure_response
        )
        when status in [429] do
-    Auth.put_runtime_api_key_override(token)
+    promote_fallback_token(token, failed_token, failure_response)
     maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
   end
 
-  defp handle_fallback_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token) do
-    log_and_fail(payload, response)
+  defp handle_fallback_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token, _failed_token, _failure_response) do
+    Auth.clear_runtime_api_key_override()
+    log_auth_and_fail(payload, response)
   end
 
-  defp handle_fallback_graphql_result({:error, reason}, _payload, _request_fun, _sleep_fun, _attempt, _token) do
+  defp handle_fallback_graphql_result({:error, reason}, _payload, _request_fun, _sleep_fun, _attempt, _token, _failed_token, _failure_response) do
+    Auth.clear_runtime_api_key_override()
     Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
     {:error, {:linear_api_request, reason}}
   end
@@ -336,6 +359,10 @@ defmodule SymphonyElixir.Linear.Client do
   defp rate_limited_body?(_body), do: false
 
   defp log_and_fail(payload, response) do
+    if Map.get(response, :status) in [401, 403] do
+      Auth.clear_runtime_api_key_override()
+    end
+
     Logger.error(
       "Linear GraphQL request failed status=#{response.status}" <>
         linear_error_context(payload, response)
@@ -343,6 +370,18 @@ defmodule SymphonyElixir.Linear.Client do
 
     {:error, {:linear_api_status, response.status}}
   end
+
+  defp log_auth_and_fail(payload, %{status: 200, body: %{"errors" => errors}} = response)
+       when is_list(errors) do
+    Logger.error(
+      "Linear GraphQL request failed authentication errors" <>
+        linear_error_context(payload, response)
+    )
+
+    {:error, {:linear_graphql_errors, errors}}
+  end
+
+  defp log_auth_and_fail(payload, response), do: log_and_fail(payload, response)
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
@@ -541,12 +580,9 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp graphql_headers do
-    case Auth.runtime_api_key_override() || Auth.resolve_api_key(Config.settings!().tracker.api_key) do
+    case Auth.resolve_api_key(Config.settings!().tracker.api_key) do
       {:error, :missing_linear_api_token} ->
         {:error, :missing_linear_api_token}
-
-      token when is_binary(token) ->
-        {:ok, token, graphql_headers_for_token(token)}
 
       {:ok, token} ->
         {:ok, token, graphql_headers_for_token(token)}
@@ -572,6 +608,56 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp auth_graphql_error?(_error), do: false
+
+  defp auth_error_body?(%{"errors" => errors}) when is_list(errors), do: Enum.any?(errors, &auth_graphql_error?/1)
+  defp auth_error_body?(_body), do: false
+
+  defp promote_fallback_token(token, failed_token, failure_response) do
+    Auth.put_runtime_api_key_override(token, failed_token)
+    maybe_file_fallback_auth_ops_issue(failure_response)
+  end
+
+  defp maybe_file_fallback_auth_ops_issue(failure_response) do
+    if Application.get_env(:symphony_elixir, :linear_auth_fallback_reported) == true do
+      :ok
+    else
+      Application.put_env(:symphony_elixir, :linear_auth_fallback_reported, true)
+      file_fallback_auth_ops_issue(failure_response)
+    end
+  end
+
+  defp file_fallback_auth_ops_issue(failure_response) do
+    Task.start(fn ->
+      title = "daemon Linear primary auth fallback in use"
+
+      body =
+        "The Symphony daemon recovered a Linear request by using the documented bootstrap credential after the primary configured credential failed. " <>
+          "Reason: #{inspect(primary_auth_failure_reason(failure_response))}. Rotate the configured Linear credential; daemon requests continue through fallback until primary auth recovers."
+
+      case fallback_auth_ops_filer().file(title, body, []) do
+        {:created, issue} ->
+          Logger.warning("Linear auth fallback ops issue created: #{issue["identifier"]}")
+
+        {:existing, issue} ->
+          Logger.warning("Linear auth fallback ops issue already open: #{issue["identifier"]}")
+
+        {:error, reason} ->
+          Logger.error("Linear auth fallback ops issue filing failed: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
+  end
+
+  defp primary_auth_failure_reason(%{status: 200, body: %{"errors" => errors}}) when is_list(errors) do
+    {:linear_graphql_errors, Enum.map(errors, &get_in(&1, ["extensions", "code"]))}
+  end
+
+  defp primary_auth_failure_reason(%{status: status}), do: {:linear_api_status, status}
+
+  defp fallback_auth_ops_filer do
+    Application.get_env(:symphony_elixir, :linear_auth_fallback_filer, OpsIssue)
+  end
 
   defp post_graphql_request(payload, headers) do
     Req.post(Config.settings!().tracker.endpoint,

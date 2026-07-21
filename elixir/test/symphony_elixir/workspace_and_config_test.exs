@@ -950,16 +950,57 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "config falls back to the documented Linear bootstrap file" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
     bootstrap_path = Path.join(System.tmp_dir!(), "linear-config-#{System.unique_integer([:positive])}.env")
 
     System.delete_env("LINEAR_API_KEY")
     File.write!(bootstrap_path, "LINEAR_API_KEY=bootstrap-linear-token\n")
     Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, bootstrap_path)
 
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn ->
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+
+      if is_nil(previous_bootstrap_path) do
+        Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+      else
+        Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, previous_bootstrap_path)
+      end
+
+      File.rm_rf(bootstrap_path)
+    end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
+      tracker_project_slug: "project"
+    )
+
+    assert Config.settings!().tracker.api_key == "bootstrap-linear-token"
+    assert :ok = Config.validate!()
+  end
+
+  test "config treats empty LINEAR_API_KEY as unresolved before bootstrap fallback" do
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
+    bootstrap_path = Path.join(System.tmp_dir!(), "linear-config-empty-env-#{System.unique_integer([:positive])}.env")
+
+    System.put_env("LINEAR_API_KEY", "")
+    File.write!(bootstrap_path, "LINEAR_API_KEY=bootstrap-linear-token\n")
+    Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, bootstrap_path)
+
+    on_exit(fn ->
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+
+      if is_nil(previous_bootstrap_path) do
+        Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+      else
+        Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, previous_bootstrap_path)
+      end
+
+      File.rm_rf(bootstrap_path)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$LINEAR_API_KEY",
       tracker_project_slug: "project"
     )
 
@@ -1096,7 +1137,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                workspace: %{root: ""}
              })
 
-    assert settings.tracker.api_key == "fallback-linear-token"
+    assert settings.tracker.api_key == nil
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 

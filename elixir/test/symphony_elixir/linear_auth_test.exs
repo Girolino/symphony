@@ -43,4 +43,27 @@ defmodule SymphonyElixir.LinearAuthTest do
                bootstrap_path: bootstrap_path <> ".missing"
              )
   end
+
+  test "default bootstrap path uses the runtime home directory" do
+    previous_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
+
+    Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+
+    on_exit(fn ->
+      if is_nil(previous_bootstrap_path) do
+        Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
+      else
+        Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, previous_bootstrap_path)
+      end
+    end)
+
+    assert Auth.default_bootstrap_path() == Path.join([System.user_home!(), ".config", "linear-codex", "env"])
+  end
+
+  test "runtime fallback override is scoped to the primary token that failed" do
+    Auth.put_runtime_api_key_override("bootstrap-key", "stale-primary")
+
+    assert {:ok, "bootstrap-key"} = Auth.resolve_api_key("stale-primary")
+    assert {:ok, "rotated-primary"} = Auth.resolve_api_key("rotated-primary")
+  end
 end

@@ -36,6 +36,8 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         previous_linear_auth_bootstrap_path = Application.get_env(:symphony_elixir, :linear_auth_bootstrap_path)
         previous_linear_api_key_override = Application.get_env(:symphony_elixir, :linear_api_key_override)
+        previous_linear_auth_fallback_reported = Application.get_env(:symphony_elixir, :linear_auth_fallback_reported)
+        previous_linear_auth_fallback_filer = Application.get_env(:symphony_elixir, :linear_auth_fallback_filer)
 
         Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, Path.join(workflow_root, "missing-linear.env"))
         write_workflow_file!(workflow_file)
@@ -58,6 +60,16 @@ defmodule SymphonyElixir.TestSupport do
           case previous_linear_auth_bootstrap_path do
             nil -> Application.delete_env(:symphony_elixir, :linear_auth_bootstrap_path)
             value -> Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, value)
+          end
+
+          case previous_linear_auth_fallback_reported do
+            nil -> Application.delete_env(:symphony_elixir, :linear_auth_fallback_reported)
+            value -> Application.put_env(:symphony_elixir, :linear_auth_fallback_reported, value)
+          end
+
+          case previous_linear_auth_fallback_filer do
+            nil -> Application.delete_env(:symphony_elixir, :linear_auth_fallback_filer)
+            value -> Application.put_env(:symphony_elixir, :linear_auth_fallback_filer, value)
           end
 
           File.rm_rf(workflow_root)
