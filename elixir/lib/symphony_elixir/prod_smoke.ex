@@ -21,6 +21,7 @@ defmodule SymphonyElixir.ProdSmoke do
 
   require Logger
 
+  alias SymphonyElixir.Linear.Auth
   alias SymphonyElixir.OpsTransport
 
   @default_port 4799
@@ -194,14 +195,7 @@ defmodule SymphonyElixir.ProdSmoke do
   """
   @spec parse_api_key_file(String.t()) :: {:ok, String.t()} | {:error, :missing_key}
   def parse_api_key_file(contents) when is_binary(contents) do
-    case Regex.run(~r/^LINEAR_API_KEY=(.*)$/m, contents) do
-      [_, raw] ->
-        key = raw |> String.trim() |> String.trim("\"") |> String.trim("'")
-        if key == "", do: {:error, :missing_key}, else: {:ok, key}
-
-      _ ->
-        {:error, :missing_key}
-    end
+    Auth.parse_api_key_file(contents)
   end
 
   @doc """
@@ -210,21 +204,14 @@ defmodule SymphonyElixir.ProdSmoke do
   @spec resolve_api_key((String.t() -> String.t() | nil), String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
   def resolve_api_key(get_env \\ &System.get_env/1, bootstrap_path \\ default_bootstrap_path()) do
-    case get_env.("LINEAR_API_KEY") do
-      value when is_binary(value) and value != "" ->
-        {:ok, value}
+    case Auth.resolve_api_key(nil, get_env: get_env, bootstrap_path: bootstrap_path) do
+      {:ok, token} ->
+        {:ok, token}
 
-      _ ->
-        with true <- File.exists?(bootstrap_path),
-             {:ok, contents} <- File.read(bootstrap_path),
-             {:ok, key} <- parse_api_key_file(contents) do
-          {:ok, key}
-        else
-          _ ->
-            {:error,
-             "LINEAR_API_KEY is not set and #{bootstrap_path} does not provide it " <>
-               "(capability checked by name only)"}
-        end
+      {:error, :missing_linear_api_token} ->
+        {:error,
+         "LINEAR_API_KEY is not set and #{bootstrap_path} does not provide it " <>
+           "(capability checked by name only)"}
     end
   end
 
@@ -371,7 +358,7 @@ defmodule SymphonyElixir.ProdSmoke do
 
   @spec default_bootstrap_path() :: String.t()
   def default_bootstrap_path do
-    Path.join([System.user_home!(), ".config", "linear-codex", "env"])
+    Auth.default_bootstrap_path()
   end
 
   # ── Journey ──────────────────────────────────────────────────────────────

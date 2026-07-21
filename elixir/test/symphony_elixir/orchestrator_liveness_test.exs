@@ -15,11 +15,52 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
     end
   end
 
+  defmodule AuthFailureLinearClient do
+    @spec fetch_issues_by_states([String.t()]) :: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    @spec fetch_candidate_issues() :: {:error, {:linear_api_status, 401}}
+    def fetch_candidate_issues do
+      send(:liveness_test_process, :fetch_candidate_issues_called)
+      {:error, {:linear_api_status, 401}}
+    end
+
+    @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, []}
+    def fetch_issue_states_by_ids(_ids), do: {:ok, []}
+  end
+
+  defmodule RecoveredLinearClient do
+    @spec fetch_issues_by_states([String.t()]) :: {:ok, []}
+    def fetch_issues_by_states(_states), do: {:ok, []}
+
+    @spec fetch_candidate_issues() :: {:ok, []}
+    def fetch_candidate_issues do
+      send(:liveness_test_process, :fetch_candidate_issues_succeeded)
+      {:ok, []}
+    end
+
+    @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [SymphonyElixir.Linear.Issue.t()]}
+    def fetch_issue_states_by_ids(_ids) do
+      {:ok,
+       [
+         %SymphonyElixir.Linear.Issue{
+           id: "busy-1",
+           identifier: "BUSY-1",
+           title: "t",
+           state: "In Progress",
+           labels: [],
+           blocked_by: []
+         }
+       ]}
+    end
+  end
+
   setup do
     Process.register(self(), :liveness_test_process)
 
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     previous_filer = Application.get_env(:symphony_elixir, :ops_issue_filer)
+    previous_linear_client = Application.get_env(:symphony_elixir, :linear_client_module)
     Application.put_env(:symphony_elixir, :ops_issue_filer, FakeFiler)
 
     test_root = Path.join(System.tmp_dir!(), "liveness-#{System.unique_integer([:positive])}")
@@ -55,6 +96,7 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
     on_exit(fn ->
       restore_env_value(:memory_tracker_issues, previous_memory_issues)
       restore_env_value(:ops_issue_filer, previous_filer)
+      restore_env_value(:linear_client_module, previous_linear_client)
       Workflow.set_workflow_file_path(original_workflow_path)
 
       if Process.whereis(SymphonyElixir.WorkflowStore) do
@@ -105,6 +147,93 @@ defmodule SymphonyElixir.OrchestratorLivenessTest do
     end)
 
     pid
+  end
+
+  test "linear auth failure files one ops issue and prevents dispatch" do
+    Application.put_env(:symphony_elixir, :linear_client_module, AuthFailureLinearClient)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      max_concurrent_agents: 1
+    )
+
+    state = %Orchestrator.State{
+      server_name: Module.concat(__MODULE__, :MissingAuthPoll),
+      poll_interval_ms: 60_000,
+      max_concurrent_agents: 1,
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, state} = Orchestrator.handle_info(:run_poll_cycle, state)
+
+    assert state.running == %{}
+    assert state.linear_auth_failure_reported == true
+    assert_receive {:ops_issue_filed, "daemon Linear auth failure", body}, 2_000
+    assert body =~ "linear_api_status, 401"
+    assert_received :fetch_candidate_issues_called
+
+    assert {:noreply, _state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    refute_receive {:ops_issue_filed, "daemon Linear auth failure", _body}, 250
+    assert_received :fetch_candidate_issues_called
+  end
+
+  test "linear auth report resets after successful fetch when slots are full" do
+    Application.put_env(:symphony_elixir, :linear_client_module, AuthFailureLinearClient)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      max_concurrent_agents: 1
+    )
+
+    state = %Orchestrator.State{
+      server_name: Module.concat(__MODULE__, :RecoveredAuthPoll),
+      poll_interval_ms: 60_000,
+      max_concurrent_agents: 1,
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, failed_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert failed_state.linear_auth_failure_reported == true
+    assert_receive {:ops_issue_filed, "daemon Linear auth failure", _body}, 2_000
+
+    busy_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(busy_pid), do: Process.exit(busy_pid, :normal)
+    end)
+
+    busy_issue = %Issue{id: "busy-1", identifier: "BUSY-1", title: "t", state: "In Progress", labels: [], blocked_by: []}
+
+    busy_state = %{
+      failed_state
+      | running: %{
+          "busy-1" => %{
+            pid: busy_pid,
+            ref: nil,
+            identifier: "BUSY-1",
+            issue: busy_issue,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new(["busy-1"])
+    }
+
+    Application.put_env(:symphony_elixir, :linear_client_module, RecoveredLinearClient)
+    assert {:noreply, recovered_state} = Orchestrator.handle_info(:run_poll_cycle, busy_state)
+
+    assert recovered_state.linear_auth_failure_reported == false
+    assert map_size(recovered_state.running) == 1
+    assert_received :fetch_candidate_issues_succeeded
+
+    Application.put_env(:symphony_elixir, :linear_client_module, AuthFailureLinearClient)
+    assert {:noreply, failed_again_state} = Orchestrator.handle_info(:run_poll_cycle, recovered_state)
+
+    assert failed_again_state.linear_auth_failure_reported == true
+    assert_receive {:ops_issue_filed, "daemon Linear auth failure", _body}, 2_000
   end
 
   test "an over-age blocked issue re-enters retry with its failure count carried" do
