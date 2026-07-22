@@ -1017,7 +1017,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  _ ->
                    false
                end,
-               500
+               2_000
              )
 
     assert %{
@@ -1037,7 +1037,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  _ ->
                    false
                end,
-               500
+               2_000
              )
 
     assert is_integer(next_poll_in_ms)
@@ -1137,41 +1137,169 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.polling.last_error.message =~ "dispatch paused for this poll"
   end
 
-  test "orchestrator restarts stalled workers with retry backoff" do
+  test "orchestrator stores and releases a run lease for dispatched workers" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-lease-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "codex.trace")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    File.mkdir_p!(test_root)
+    File.write!(codex_binary, completed_turn_codex_script(trace_file))
+    File.chmod!(codex_binary, 0o755)
+
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
-      codex_stall_timeout_ms: 1_000
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server",
+      max_turns: 1,
+      poll_interval_ms: 30_000
     )
 
-    issue_id = "issue-stall"
-    orchestrator_name = Module.concat(__MODULE__, :StallOrchestrator)
+    issue = %Issue{
+      id: "issue-orchestrator-lease-dispatch",
+      identifier: "MT-LEASE-DISPATCH",
+      title: "Lease dispatch",
+      state: "In Progress",
+      labels: []
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RunLeaseDispatchOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
       if Process.alive?(pid) do
         Process.exit(pid, :normal)
       end
+
+      File.rm_rf(test_root)
     end)
 
-    worker_pid =
-      spawn(fn ->
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_state(
+        pid,
+        fn state ->
+          MapSet.member?(state.completed, issue.id) and
+            Map.has_key?(state.retry_attempts, issue.id) and
+            not Map.has_key?(state.running, issue.id)
+        end,
+        2_000
+      )
+
+    assert %{attempt: 1} = state.retry_attempts[issue.id]
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Done"}])
+
+    assert {:ok, lease} = SymphonyElixir.AgentRunLease.acquire(issue)
+    assert :ok = SymphonyElixir.AgentRunLease.release(lease)
+
+    trace_lines = trace_file |> File.read!() |> String.split("\n", trim: true)
+    assert Enum.any?(trace_lines, &String.starts_with?(&1, "RUN:"))
+  end
+
+  test "orchestrator skips dispatch while another session holds the run lease" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-lease-busy-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      codex_command: "#{Path.join(test_root, "missing-codex")} app-server",
+      poll_interval_ms: 30_000
+    )
+
+    issue = %Issue{
+      id: "issue-orchestrator-lease-busy",
+      identifier: "MT-LEASE-BUSY",
+      title: "Lease busy",
+      state: "In Progress",
+      labels: []
+    }
+
+    File.mkdir_p!(test_root)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert {:ok, held_lease} = SymphonyElixir.AgentRunLease.acquire(issue)
+
+    orchestrator_name = Module.concat(__MODULE__, :RunLeaseBusyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      SymphonyElixir.AgentRunLease.release(held_lease)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(test_root)
+    end)
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue.id)
+    refute MapSet.member?(state.claimed, issue.id)
+    assert :ok = SymphonyElixir.AgentRunLease.release(held_lease)
+  end
+
+  test "orchestrator restarts stalled workers with retry backoff" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-stall-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      codex_stall_timeout_ms: 1_000,
+      workspace_root: workspace_root
+    )
+
+    issue_id = "issue-stall"
+    issue = %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"}
+    orchestrator_name = Module.concat(__MODULE__, :StallOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    assert {:ok, lease} = SymphonyElixir.AgentRunLease.acquire(issue)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
         receive do
           :done -> :ok
         end
       end)
 
+    worker_ref = Process.monitor(worker_pid)
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
     initial_state = :sys.get_state(pid)
 
     running_entry = %{
       pid: worker_pid,
-      ref: make_ref(),
+      ref: worker_ref,
       identifier: "MT-STALL",
-      issue: %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"},
+      issue: issue,
       session_id: "thread-stall-turn-stall",
       last_codex_message: nil,
       last_codex_timestamp: stale_activity_at,
       last_codex_event: :notification,
+      agent_run_lease: lease,
       started_at: stale_activity_at
     }
 
@@ -1187,6 +1315,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
+    assert {:ok, reacquired_lease} = SymphonyElixir.AgentRunLease.acquire(issue)
+    assert :ok = SymphonyElixir.AgentRunLease.release(reacquired_lease)
 
     assert %{
              attempt: 1,
@@ -1994,6 +2124,36 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp completed_turn_codex_script(trace_file) do
+    """
+    #!/bin/sh
+    printf 'RUN:%s\\n' "$$" >> "#{trace_file}"
+    count=0
+
+    while IFS= read -r _line; do
+      count=$((count + 1))
+
+      case "$count" in
+        1)
+          printf '%s\\n' '{"id":1,"result":{}}'
+          ;;
+        2)
+          ;;
+        3)
+          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-lease-dispatch"}}}'
+          ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-lease-dispatch"}}}'
+          printf '%s\\n' '{"method":"turn/completed"}'
+          exit 0
+          ;;
+        *)
+          ;;
+      esac
+    done
+    """
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

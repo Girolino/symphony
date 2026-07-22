@@ -91,8 +91,39 @@ defmodule SymphonyElixir.AgentRunLease do
   defp create_reclaim_lock(reclaim_path) do
     case File.mkdir(reclaim_path) do
       :ok -> :ok
-      {:error, :eexist} -> :busy
+      {:error, :eexist} -> maybe_reclaim_stale_reclaim_lock(reclaim_path)
       {:error, reason} -> {:error, {:agent_run_lease_reclaim_lock_failed, reclaim_path, reason}}
+    end
+  end
+
+  defp maybe_reclaim_stale_reclaim_lock(reclaim_path) do
+    with :ok <- move_stale_reclaim_lock(reclaim_path) do
+      create_reclaim_lock(reclaim_path)
+    end
+  end
+
+  defp move_stale_reclaim_lock(reclaim_path) do
+    cond do
+      File.exists?(reclaim_path) and not stale?(reclaim_path) ->
+        :busy
+
+      File.exists?(reclaim_path) ->
+        reclaimed_path = reclaimed_lease_path(reclaim_path)
+
+        case File.rename(reclaim_path, reclaimed_path) do
+          :ok ->
+            Logger.warning("Reclaiming stale agent run lease reclaim lock path=#{reclaim_path}")
+            remove_path(reclaimed_path, :stale_reclaim_lock)
+
+          {:error, :enoent} ->
+            :ok
+
+          {:error, reason} ->
+            {:error, {:agent_run_lease_reclaim_lock_rename_failed, reclaim_path, reason}}
+        end
+
+      true ->
+        :ok
     end
   end
 
@@ -171,26 +202,51 @@ defmodule SymphonyElixir.AgentRunLease do
     end
   end
 
+  defp metadata_stale_status(%{
+         "owner_os_pid" => owner_os_pid,
+         "owner_elixir_pid" => owner_elixir_pid,
+         "acquired_unix_ms" => acquired_unix_ms
+       })
+       when is_binary(owner_os_pid) and is_binary(owner_elixir_pid) and is_integer(acquired_unix_ms) do
+    {:known, owner_process_stale?(owner_os_pid, owner_elixir_pid)}
+  end
+
   defp metadata_stale_status(%{"owner_os_pid" => owner_os_pid, "acquired_unix_ms" => acquired_unix_ms})
        when is_binary(owner_os_pid) and is_integer(acquired_unix_ms) do
-    {:known, !os_pid_alive?(owner_os_pid)}
+    if owner_os_pid == System.pid() do
+      :unknown
+    else
+      {:known, !os_pid_alive?(owner_os_pid)}
+    end
   end
 
   defp metadata_stale_status(_metadata), do: :unknown
 
+  defp owner_process_stale?(owner_os_pid, owner_elixir_pid) do
+    if owner_os_pid == System.pid() do
+      not local_elixir_pid_alive?(owner_elixir_pid)
+    else
+      not os_pid_alive?(owner_os_pid)
+    end
+  end
+
+  defp local_elixir_pid_alive?(owner_elixir_pid) do
+    owner_elixir_pid
+    |> String.to_charlist()
+    |> :erlang.list_to_pid()
+    |> Process.alive?()
+  rescue
+    _error -> true
+  end
+
   defp os_pid_alive?(owner_os_pid) do
-    cond do
-      owner_os_pid == System.pid() ->
-        true
-
-      !integer_string?(owner_os_pid) ->
-        true
-
-      true ->
-        case System.cmd("kill", ["-0", owner_os_pid], stderr_to_stdout: true) do
-          {_output, 0} -> true
-          _ -> false
-        end
+    if integer_string?(owner_os_pid) do
+      case System.cmd("kill", ["-0", owner_os_pid], stderr_to_stdout: true) do
+        {_output, 0} -> true
+        _ -> false
+      end
+    else
+      true
     end
   rescue
     _error -> true
@@ -247,6 +303,7 @@ defmodule SymphonyElixir.AgentRunLease do
       issue_identifier: issue_identifier(issue_or_identifier),
       worker_host: worker_host,
       owner_os_pid: System.pid(),
+      owner_elixir_pid: owner_elixir_pid(),
       acquired_unix_ms: current_unix_ms()
     }
   end
@@ -314,6 +371,12 @@ defmodule SymphonyElixir.AgentRunLease do
   defp lease_token do
     System.unique_integer([:positive, :monotonic])
     |> Integer.to_string()
+  end
+
+  defp owner_elixir_pid do
+    self()
+    |> :erlang.pid_to_list()
+    |> List.to_string()
   end
 
   if Mix.env() == :test do

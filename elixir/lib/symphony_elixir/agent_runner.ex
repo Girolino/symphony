@@ -30,13 +30,19 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
+    case Keyword.get(opts, :agent_run_lease) do
+      %{path: path, token: token} = lease when is_binary(path) and is_binary(token) ->
+        run_with_acquired_lease(lease, issue, codex_update_recipient, opts, worker_host)
+
+      _ ->
+        acquire_and_run(issue, codex_update_recipient, opts, worker_host)
+    end
+  end
+
+  defp acquire_and_run(issue, codex_update_recipient, opts, worker_host) do
     case AgentRunLease.acquire(issue, worker_host) do
       {:ok, lease} ->
-        try do
-          do_run_on_worker_host(issue, codex_update_recipient, opts, worker_host)
-        after
-          AgentRunLease.release(lease)
-        end
+        run_with_acquired_lease(lease, issue, codex_update_recipient, opts, worker_host)
 
       :busy ->
         Logger.info("Skipping agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}; another Symphony session holds the active run lease")
@@ -45,6 +51,12 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp run_with_acquired_lease(lease, issue, codex_update_recipient, opts, worker_host) do
+    do_run_on_worker_host(issue, codex_update_recipient, opts, worker_host)
+  after
+    AgentRunLease.release(lease)
   end
 
   defp do_run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
