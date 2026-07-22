@@ -561,15 +561,16 @@ defmodule SymphonyElixir.AgentRunLeaseTest do
       assert :busy = AgentRunLease.acquire(issue)
       assert Process.alive?(first.pid)
 
+      File.write!(allow_tool_file, "allow")
+      assert_receive {:workpad_comment_create_entered, comment_create_pid}, 2_000
+      assert comment_create_pid == first.pid
+
       second =
         Task.async(fn ->
           AgentRunner.run(issue, parent, issue_state_fetcher: state_fetcher)
         end)
 
       assert :ok = Task.await(second, 2_000)
-      File.write!(allow_tool_file, "allow")
-      assert_receive {:workpad_comment_create_entered, comment_create_pid}, 2_000
-      assert comment_create_pid == first.pid
       send(comment_create_pid, :release_workpad_comment_create)
       File.write!(release_file, "release")
       assert :ok = Task.await(first, 5_000)
