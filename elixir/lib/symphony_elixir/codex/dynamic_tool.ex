@@ -55,7 +55,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp execute_linear_graphql(arguments, opts) do
-    linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
+    linear_client = linear_client(opts)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
          {:ok, response} <- linear_client.(query, variables, []) do
@@ -63,6 +63,13 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp linear_client(opts) do
+    case Keyword.get(opts, :linear_client) || Application.get_env(:symphony_elixir, :linear_graphql_client) do
+      client when is_function(client, 3) -> client
+      _ -> &Client.graphql/3
     end
   end
 

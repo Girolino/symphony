@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{
+    AgentRunLease,
     AgentRunner,
     Config,
     Linear.Client,
@@ -145,6 +146,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        release_agent_run_lease(running_entry)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
@@ -565,7 +567,7 @@ defmodule SymphonyElixir.Orchestrator do
           cleanup_issue_workspace(identifier, worker_host)
         end
 
-        stop_running_task(pid, ref)
+        stop_running_task(pid, ref, running_entry)
 
         %{
           state
@@ -739,10 +741,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_task(_pid), do: :ok
 
-  defp stop_running_task(pid, ref) do
+  defp stop_running_task(pid, ref, running_entry) do
     if is_pid(pid) do
       terminate_task(pid)
     end
+
+    release_agent_run_lease(running_entry)
 
     if is_reference(ref) do
       Process.demonitor(ref, [:flush])
@@ -752,9 +756,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
-    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref), running_entry)
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
+
+  defp release_agent_run_lease(%{agent_run_lease: lease}) do
+    case AgentRunLease.release(lease) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to release agent run lease after orchestrator termination: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp release_agent_run_lease(_running_entry), do: :ok
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
     blocked_entry = %{
@@ -976,8 +993,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, retry_failures) do
+    case AgentRunLease.acquire(issue, worker_host) do
+      {:ok, lease} ->
+        start_leased_issue_on_worker_host(state, issue, attempt, recipient, worker_host, retry_failures, lease)
+
+      :busy ->
+        Logger.info("Skipping dispatch for #{issue_context(issue)} worker_host=#{worker_host || "local"}; another Symphony session holds the active run lease")
+        state
+
+      {:error, reason} ->
+        Logger.error("Unable to acquire agent run lease for #{issue_context(issue)}: #{inspect(reason)}")
+        next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
+
+        schedule_issue_retry(state, issue.id, next_attempt, %{
+          identifier: issue.identifier,
+          carry_failures: retry_failures,
+          error: "failed to acquire agent run lease: #{inspect(reason)}",
+          worker_host: worker_host
+        })
+    end
+  end
+
+  defp start_leased_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, retry_failures, lease) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             agent_run_lease: lease
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1006,6 +1049,7 @@ defmodule SymphonyElixir.Orchestrator do
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             retry_failures: retry_failures,
+            agent_run_lease: lease,
             started_at: DateTime.utc_now()
           })
 
@@ -1017,6 +1061,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       {:error, reason} ->
+        release_agent_run_lease(%{agent_run_lease: lease})
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 

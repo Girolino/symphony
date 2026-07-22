@@ -38,6 +38,10 @@ defmodule SymphonyElixir.TestSupport do
         previous_linear_api_key_override = Application.get_env(:symphony_elixir, :linear_api_key_override)
         previous_linear_auth_fallback_reported = Application.get_env(:symphony_elixir, :linear_auth_fallback_reported)
         previous_linear_auth_fallback_filer = Application.get_env(:symphony_elixir, :linear_auth_fallback_filer)
+        previous_linear_graphql_client = Application.get_env(:symphony_elixir, :linear_graphql_client)
+
+        previous_agent_run_lease_reclaim_observer =
+          Application.get_env(:symphony_elixir, :agent_run_lease_reclaim_observer)
 
         Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, Path.join(workflow_root, "missing-linear.env"))
         write_workflow_file!(workflow_file)
@@ -51,6 +55,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :metrics_ledger_file)
+          Application.delete_env(:symphony_elixir, :workpad_race_table)
 
           case previous_linear_api_key_override do
             nil -> Application.delete_env(:symphony_elixir, :linear_api_key_override)
@@ -70,6 +75,16 @@ defmodule SymphonyElixir.TestSupport do
           case previous_linear_auth_fallback_filer do
             nil -> Application.delete_env(:symphony_elixir, :linear_auth_fallback_filer)
             value -> Application.put_env(:symphony_elixir, :linear_auth_fallback_filer, value)
+          end
+
+          case previous_linear_graphql_client do
+            nil -> Application.delete_env(:symphony_elixir, :linear_graphql_client)
+            value -> Application.put_env(:symphony_elixir, :linear_graphql_client, value)
+          end
+
+          case previous_agent_run_lease_reclaim_observer do
+            nil -> Application.delete_env(:symphony_elixir, :agent_run_lease_reclaim_observer)
+            value -> Application.put_env(:symphony_elixir, :agent_run_lease_reclaim_observer, value)
           end
 
           File.rm_rf(workflow_root)
