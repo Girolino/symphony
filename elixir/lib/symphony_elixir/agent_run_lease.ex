@@ -149,10 +149,8 @@ defmodule SymphonyElixir.AgentRunLease do
   defp with_reclaim_lock(reclaim_path, issue_key, fun) do
     write_reclaim_lock_metadata!(reclaim_path, issue_key)
     result = fun.()
-
-    with :ok <- remove_path(reclaim_path, :reclaim_lock) do
-      result
-    end
+    _ = remove_path(reclaim_path, :reclaim_lock)
+    result
   after
     if File.exists?(reclaim_path), do: remove_path(reclaim_path, :reclaim_lock)
   end
