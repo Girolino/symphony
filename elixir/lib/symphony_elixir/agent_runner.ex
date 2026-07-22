@@ -4,8 +4,8 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.{AgentRunLease, Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.Linear.{Client, Issue}
 
   @type worker_host :: String.t() | nil
@@ -30,6 +30,24 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
+    case AgentRunLease.acquire(issue, worker_host) do
+      {:ok, lease} ->
+        try do
+          do_run_on_worker_host(issue, codex_update_recipient, opts, worker_host)
+        after
+          AgentRunLease.release(lease)
+        end
+
+      :busy ->
+        Logger.info("Skipping agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}; another Symphony session holds the active run lease")
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
