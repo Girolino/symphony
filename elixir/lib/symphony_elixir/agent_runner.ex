@@ -173,7 +173,10 @@ defmodule SymphonyElixir.AgentRunner do
         end
 
       {:error, :response_timeout} when turn_number > 1 ->
-        Logger.warning("Continuation turn start timed out for #{issue_context(issue)} turn=#{turn_number}/#{max_turns}; returning control to orchestrator continuation retry")
+        Logger.warning(
+          "follow-up Codex turn start failed for #{issue_context(issue)} thread_id=#{app_session[:thread_id]} turn=#{turn_number}/#{max_turns}: :response_timeout; returning control to orchestrator continuation retry"
+        )
+
         :ok
 
       {:error, reason} ->

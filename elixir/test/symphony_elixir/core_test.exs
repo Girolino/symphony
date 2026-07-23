@@ -21,16 +21,6 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  defp traced_method_count(trace_file, method) when is_binary(method) do
-    trace_file
-    |> File.read!()
-    |> String.split("\n", trim: true)
-    |> Enum.filter(&String.starts_with?(&1, "JSON:"))
-    |> Enum.map(&String.trim_leading(&1, "JSON:"))
-    |> Enum.map(&Jason.decode!/1)
-    |> Enum.count(&(&1["method"] == method))
-  end
-
   defmodule AuthFailureLinearClient do
     @spec fetch_candidate_issues() :: {:error, {:linear_api_status, 401}}
     def fetch_candidate_issues, do: {:error, {:linear_api_status, 401}}
@@ -1498,6 +1488,8 @@ defmodule SymphonyElixir.CoreTest do
         "symphony-elixir-agent-runner-continuation-#{System.unique_integer([:positive])}"
       )
 
+    previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
     try do
       template_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
@@ -1546,7 +1538,7 @@ defmodule SymphonyElixir.CoreTest do
       File.chmod!(codex_binary, 0o755)
       System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
 
-      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+      on_exit(fn -> restore_env("SYMP_TEST_CODEx_TRACE", previous_trace) end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -1617,81 +1609,88 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
     after
-      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
       File.rm_rf(test_root)
     end
   end
 
-  test "agent runner returns control after continuation turn start response timeout" do
+  test "agent runner returns control when a follow-up turn start response times out" do
     test_root =
       Path.join(
         System.tmp_dir!(),
-        "symphony-elixir-agent-runner-continuation-timeout-#{System.unique_integer([:positive])}"
+        "symphony-elixir-agent-runner-continuation-response-timeout-#{System.unique_integer([:positive])}"
       )
+
+    previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
 
     try do
       template_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
       codex_binary = Path.join(test_root, "fake-codex")
-      trace_file = Path.join(test_root, "codex-continuation-timeout.trace")
+      trace_file = Path.join(test_root, "codex-timeout.trace")
 
       File.mkdir_p!(template_repo)
       File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
 
       File.write!(codex_binary, """
       #!/bin/sh
-      trace_file="${SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE:-/tmp/codex-continuation-timeout.trace}"
-      printf 'RUN\\n' >> "$trace_file"
-      count=0
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-timeout.trace}"
+      turn_count=0
 
       while IFS= read -r line; do
-        count=$((count + 1))
         printf 'JSON:%s\\n' "$line" >> "$trace_file"
-
-        case "$count" in
-          1)
+        case "$line" in
+          *'"method":"initialize"'*)
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
-          2)
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-timeout"}}}'
             ;;
-          3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-continuation-timeout"}}}'
-            ;;
-          4)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-continuation-timeout-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
-            ;;
-          5)
-            sleep 1
+          *'"method":"turn/start"'*)
+            turn_count=$((turn_count + 1))
+            case "$turn_count" in
+              1)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-timeout-1"}}}'
+                printf '%s\\n' '{"method":"turn/completed"}'
+                ;;
+              *)
+                sleep 60
+                ;;
+            esac
             ;;
         esac
       done
       """)
 
       File.chmod!(codex_binary, 0o755)
-      System.put_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE", trace_file)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
 
-      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE") end)
+      on_exit(fn -> restore_env("SYMP_TEST_CODEx_TRACE", previous_trace) end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",
-        codex_read_timeout_ms: 500,
+        codex_read_timeout_ms: 1_000,
         max_turns: 3
       )
 
       parent = self()
 
       state_fetcher = fn [_issue_id] ->
-        send(parent, :issue_state_refresh)
+        send(parent, :issue_state_fetch)
 
         {:ok,
          [
            %Issue{
-             id: "issue-continuation-timeout",
+             id: "issue-timeout",
              identifier: "MT-249",
-             title: "Continuation timeout",
+             title: "Continue after timeout",
              description: "Still active after first turn",
              state: "In Progress"
            }
@@ -1699,9 +1698,9 @@ defmodule SymphonyElixir.CoreTest do
       end
 
       issue = %Issue{
-        id: "issue-continuation-timeout",
+        id: "issue-timeout",
         identifier: "MT-249",
-        title: "Continuation timeout",
+        title: "Continue after timeout",
         description: "Still active after first turn",
         state: "In Progress",
         url: "https://example.org/issues/MT-249",
@@ -1713,13 +1712,23 @@ defmodule SymphonyElixir.CoreTest do
           assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
         end)
 
-      assert_receive :issue_state_refresh
-      assert log =~ "Continuation turn start timed out"
-      assert log =~ "issue_id=issue-continuation-timeout issue_identifier=MT-249"
+      assert_receive :issue_state_fetch
+      assert log =~ "follow-up Codex turn start failed"
+      assert log =~ "thread_id=thread-timeout"
+      assert log =~ ":response_timeout"
 
-      assert traced_method_count(trace_file, "turn/start") == 2
+      turn_start_requests =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["method"] == "turn/start"))
+
+      assert length(turn_start_requests) == 2
     after
-      System.delete_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE")
+      restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
       File.rm_rf(test_root)
     end
   end
@@ -1899,6 +1908,8 @@ defmodule SymphonyElixir.CoreTest do
         "symphony-elixir-agent-runner-max-turns-#{System.unique_integer([:positive])}"
       )
 
+    previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
     try do
       template_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
@@ -1946,7 +1957,7 @@ defmodule SymphonyElixir.CoreTest do
       File.chmod!(codex_binary, 0o755)
       System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
 
-      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+      on_exit(fn -> restore_env("SYMP_TEST_CODEx_TRACE", previous_trace) end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -1984,7 +1995,7 @@ defmodule SymphonyElixir.CoreTest do
       assert length(String.split(trace, "RUN", trim: true)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
     after
-      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
       File.rm_rf(test_root)
     end
   end
