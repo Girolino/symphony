@@ -1728,6 +1728,88 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner fails first turn start response timeout" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-first-turn-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-first-turn-timeout.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE:-/tmp/codex-first-turn-timeout.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-first-turn-timeout"}}}'
+            ;;
+          4)
+            sleep 3
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 2_000,
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :unexpected_issue_state_refresh)
+        {:ok, []}
+      end
+
+      issue = %Issue{
+        id: "issue-first-turn-timeout",
+        identifier: "MT-250",
+        title: "First turn timeout",
+        description: "First turn start does not respond",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-250",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/Agent run failed .*:response_timeout/, fn ->
+        AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      end
+
+      refute_receive :unexpected_issue_state_refresh, 50
+    after
+      System.delete_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner does not crash completed turns when Linear auth fails during state refresh" do
     test_root =
       Path.join(
