@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  @orchestrator_inspection_timeout_ms 15_000
+
   defmodule Linear401DispatchClient do
     def fetch_issues_by_states(_states), do: {:ok, []}
 
@@ -60,7 +62,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     started_at = DateTime.utc_now()
 
     running_entry = %{
@@ -105,7 +107,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.session_id == "thread-live-turn-live"
@@ -140,7 +142,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -173,11 +175,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
 
     send(pid, {:codex_worker_update, issue_id, notification.(1)})
-    first_token = :sys.get_state(pid).codex_snapshot_publish_token
+    first_token = orchestrator_state(pid).codex_snapshot_publish_token
     assert is_reference(first_token)
 
     send(pid, {:codex_worker_update, issue_id, notification.(2)})
-    assert :sys.get_state(pid).codex_snapshot_publish_token == first_token
+    assert orchestrator_state(pid).codex_snapshot_publish_token == first_token
 
     assert %{codex_snapshot_publish_token: nil} =
              wait_for_state(pid, fn state -> state.codex_snapshot_publish_token == nil end, 5_000)
@@ -219,7 +221,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -278,7 +280,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_app_server_pid == "4242"
     assert snapshot_entry.codex_input_tokens == 12
@@ -288,7 +290,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(snapshot_entry.runtime_seconds)
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid)
+    completed_state = orchestrator_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 12
     assert completed_state.codex_totals.output_tokens == 4
@@ -317,7 +319,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -358,14 +360,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 12
     assert snapshot_entry.codex_output_tokens == 4
     assert snapshot_entry.codex_total_tokens == 16
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid)
+    completed_state = orchestrator_state(pid)
     assert completed_state.codex_totals.input_tokens == 12
     assert completed_state.codex_totals.output_tokens == 4
     assert completed_state.codex_totals.total_tokens == 16
@@ -398,7 +400,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     first_orchestrator_name = Module.concat(__MODULE__, :PersistedTotalsFirstOrchestrator)
     {:ok, first_pid} = Orchestrator.start_link(name: first_orchestrator_name)
 
-    initial_state = :sys.get_state(first_pid)
+    initial_state = orchestrator_state(first_pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -442,7 +444,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(first_pid, {:DOWN, process_ref, :process, self(), :normal})
     Process.sleep(10)
 
-    first_state = :sys.get_state(first_pid)
+    first_state = orchestrator_state(first_pid)
     assert first_state.codex_totals.input_tokens == 12
     assert first_state.codex_totals.output_tokens == 4
     assert first_state.codex_totals.total_tokens == 16
@@ -463,7 +465,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    second_state = :sys.get_state(second_pid)
+    second_state = orchestrator_state(second_pid)
     assert second_state.codex_totals.input_tokens == 12
     assert second_state.codex_totals.output_tokens == 4
     assert second_state.codex_totals.total_tokens == 16
@@ -491,7 +493,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -569,14 +571,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 5
     assert snapshot_entry.codex_total_tokens == 15
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid)
+    completed_state = orchestrator_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 10
     assert completed_state.codex_totals.output_tokens == 5
@@ -604,7 +606,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -660,7 +662,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert snapshot.rate_limits == rate_limits
   end
 
@@ -685,7 +687,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -745,7 +747,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 200
     assert snapshot_entry.codex_output_tokens == 100
@@ -773,7 +775,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -819,7 +821,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       )
     end
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 4
@@ -847,7 +849,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
 
@@ -902,7 +904,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        }}
     )
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 0
     assert snapshot_entry.codex_output_tokens == 0
@@ -927,11 +929,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       error: "agent exited: :boom"
     }
 
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
     new_state = %{initial_state | retry_attempts: %{"mt-500" => retry_entry}}
     :sys.replace_state(pid, fn _ -> new_state end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert is_list(snapshot.retrying)
 
     assert [
@@ -970,7 +972,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
 
     assert %{
              polling: %{
@@ -988,7 +990,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
     assert %{polling: %{checking?: true, next_poll_in_ms: nil}} = snapshot
   end
 
@@ -1245,7 +1247,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     Process.sleep(100)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     refute Map.has_key?(state.running, issue.id)
     refute MapSet.member?(state.claimed, issue.id)
@@ -1260,6 +1262,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       )
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000,
       workspace_root: workspace_root
@@ -1267,6 +1270,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-stall"
     issue = %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     orchestrator_name = Module.concat(__MODULE__, :StallOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
     assert {:ok, lease} = SymphonyElixir.AgentRunLease.acquire(issue)
@@ -1288,7 +1292,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     worker_ref = Process.monitor(worker_pid)
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: worker_pid,
@@ -1332,11 +1336,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
 
     issue_id = "issue-mcp-elicitation-stall"
+    issue = %Issue{id: issue_id, identifier: "MT-MCP", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1346,21 +1353,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    worker_pid =
-      spawn(fn ->
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
         receive do
           :done -> :ok
         end
       end)
 
+    worker_ref = Process.monitor(worker_pid)
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: worker_pid,
-      ref: make_ref(),
+      ref: worker_ref,
       identifier: "MT-MCP",
-      issue: %Issue{id: issue_id, identifier: "MT-MCP", state: "In Progress"},
+      issue: issue,
       worker_host: "dm-dev2",
       workspace_path: "/workspaces/MT-MCP",
       session_id: "thread-mcp-turn-mcp",
@@ -1414,7 +1422,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     ref = make_ref()
     started_at = DateTime.utc_now()
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1465,7 +1473,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     ref = make_ref()
-    initial_state = :sys.get_state(pid)
+    initial_state = orchestrator_state(pid)
 
     running_entry = %{
       pid: self(),
@@ -1488,7 +1496,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
     refute Map.has_key?(state.retry_attempts, issue_id)
@@ -2172,8 +2180,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_published_snapshot(orchestrator_name, predicate, deadline_ms)
   end
 
+  defp orchestrator_state(pid), do: :sys.get_state(pid, @orchestrator_inspection_timeout_ms)
+
+  defp orchestrator_snapshot(pid), do: GenServer.call(pid, :snapshot, @orchestrator_inspection_timeout_ms)
+
   defp do_wait_for_state(pid, predicate, deadline_ms) do
-    state = :sys.get_state(pid)
+    state = orchestrator_state(pid)
 
     cond do
       predicate.(state) ->
@@ -2214,7 +2226,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot = orchestrator_snapshot(pid)
 
     if predicate.(snapshot) do
       snapshot
