@@ -3,6 +3,8 @@ defmodule SymphonyElixir.SSHTest do
 
   alias SymphonyElixir.SSH
 
+  @fake_ssh_ready_timeout_ms 2_000
+
   test "run/3 keeps bracketed IPv6 host:port targets intact" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-ipv6-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -125,7 +127,7 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:ok, port} = SSH.start_port("localhost", "printf ok")
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_fake_ssh_ready!(port, :binary)
 
     trace = File.read!(trace_file)
     assert trace =~ "-T localhost bash -lc"
@@ -151,7 +153,7 @@ defmodule SymphonyElixir.SSHTest do
 
     assert {:ok, port} = SSH.start_port("localhost:2222", "printf ok", line: 256)
     assert is_port(port)
-    wait_for_trace!(trace_file)
+    assert_fake_ssh_ready!(port, :line)
 
     trace = File.read!(trace_file)
     assert trace =~ "-T -p 2222 localhost bash -lc"
@@ -182,16 +184,12 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 
-  defp wait_for_trace!(trace_file, attempts \\ 20)
-  defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
+  defp assert_fake_ssh_ready!(port, :binary) do
+    assert_receive {^port, {:data, "ready\n"}}, @fake_ssh_ready_timeout_ms
+  end
 
-  defp wait_for_trace!(trace_file, attempts) do
-    if File.exists?(trace_file) and File.read!(trace_file) != "" do
-      :ok
-    else
-      Process.sleep(25)
-      wait_for_trace!(trace_file, attempts - 1)
-    end
+  defp assert_fake_ssh_ready!(port, :line) do
+    assert_receive {^port, {:data, {:eol, "ready"}}}, @fake_ssh_ready_timeout_ms
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

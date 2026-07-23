@@ -1143,7 +1143,11 @@ defmodule SymphonyElixir.AppServerTest do
       workspace_root = Path.join(test_root, "workspaces")
       workspace = Path.join(workspace_root, "MT-91")
       codex_binary = Path.join(test_root, "fake-codex")
+      large_response_file = Path.join(test_root, "large-response.json")
       File.mkdir_p!(workspace)
+
+      padding = String.duplicate("a", 1_100_000)
+      File.write!(large_response_file, ~s({"id":1,"result":{},"padding":"#{padding}"}\n))
 
       File.write!(codex_binary, """
       #!/bin/sh
@@ -1153,8 +1157,7 @@ defmodule SymphonyElixir.AppServerTest do
 
         case "$count" in
           1)
-            padding=$(printf '%*s' 1100000 '' | tr ' ' a)
-            printf '{"id":1,"result":{},"padding":"%s"}\\n' "$padding"
+            cat "#{large_response_file}"
             ;;
           2)
             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"}}}'
