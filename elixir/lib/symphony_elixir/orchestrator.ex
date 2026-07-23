@@ -243,6 +243,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
         delay_type: :continuation,
+        failure?: false,
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path)
       })

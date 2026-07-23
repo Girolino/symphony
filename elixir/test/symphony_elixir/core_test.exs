@@ -21,6 +21,16 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  defp traced_method_count(trace_file, method) when is_binary(method) do
+    trace_file
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+    |> Enum.map(&String.trim_leading(&1, "JSON:"))
+    |> Enum.map(&Jason.decode!/1)
+    |> Enum.count(&(&1["method"] == method))
+  end
+
   defmodule AuthFailureLinearClient do
     @spec fetch_candidate_issues() :: {:error, {:linear_api_status, 401}}
     def fetch_candidate_issues, do: {:error, {:linear_api_status, 401}}
@@ -590,7 +600,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+    assert %{attempt: 1, due_at_ms: due_at_ms, failures: 0} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, retry_window_started_at_ms, 500, 1_100)
   end
@@ -1608,6 +1618,190 @@ defmodule SymphonyElixir.CoreTest do
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner returns control after continuation turn start response timeout" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-continuation-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-continuation-timeout.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE:-/tmp/codex-continuation-timeout.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-continuation-timeout"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-continuation-timeout-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          5)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 500,
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :issue_state_refresh)
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-continuation-timeout",
+             identifier: "MT-249",
+             title: "Continuation timeout",
+             description: "Still active after first turn",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-continuation-timeout",
+        identifier: "MT-249",
+        title: "Continuation timeout",
+        description: "Still active after first turn",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-249",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        end)
+
+      assert_receive :issue_state_refresh
+      assert log =~ "Continuation turn start timed out"
+      assert log =~ "issue_id=issue-continuation-timeout issue_identifier=MT-249"
+
+      assert traced_method_count(trace_file, "turn/start") == 2
+    after
+      System.delete_env("SYMP_TEST_CODEX_CONTINUATION_TIMEOUT_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner fails first turn start response timeout" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-first-turn-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-first-turn-timeout.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE:-/tmp/codex-first-turn-timeout.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-first-turn-timeout"}}}'
+            ;;
+          4)
+            sleep 3
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 2_000,
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :unexpected_issue_state_refresh)
+        {:ok, []}
+      end
+
+      issue = %Issue{
+        id: "issue-first-turn-timeout",
+        identifier: "MT-250",
+        title: "First turn timeout",
+        description: "First turn start does not respond",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-250",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/Agent run failed .*:response_timeout/, fn ->
+        AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      end
+
+      refute_receive :unexpected_issue_state_refresh, 50
+    after
+      System.delete_env("SYMP_TEST_CODEX_FIRST_TURN_TIMEOUT_TRACE")
       File.rm_rf(test_root)
     end
   end

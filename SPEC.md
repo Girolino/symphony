@@ -638,6 +638,8 @@ Important nuance:
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- Normal continuation retries are not issue failures and MUST NOT advance the consecutive-failure
+  breaker count.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -670,6 +672,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
     turn loop.
+  - Do not advance issue failure counters for the continuation retry.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
@@ -988,6 +991,10 @@ Continuation processing:
   live thread using the targeted protocol.
 - The app-server subprocess SHOULD remain alive across those continuation turns and be stopped only
   when the worker run is ending.
+- If a continuation `turn/start` request times out after at least one successful turn in the same
+  worker run, the worker MAY stop the current app-server session and return control to the
+  orchestrator as a normal continuation handoff. Startup and first-turn response timeouts remain
+  worker-attempt failures.
 
 Transport handling requirements:
 
@@ -1127,7 +1134,9 @@ Behavior:
 2. Build prompt from workflow template.
 3. Start app-server session.
 4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+5. On any error, fail the worker attempt (the orchestrator will retry), except a continuation
+   `turn/start` response timeout after a completed turn MAY return control as a normal continuation
+   handoff.
 
 Note:
 
@@ -2002,6 +2011,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
+- Normal continuation retries do not advance consecutive failure counts
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
@@ -2021,6 +2031,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Thread and turn identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
 - Request/response read timeout is enforced
+- Startup and first-turn response timeouts fail the worker attempt; continuation `turn/start`
+  response timeouts after a completed turn may hand off to a fresh continuation retry
 - Turn timeout is enforced
 - Transport framing required by the targeted protocol is handled correctly
 - For stdio-based transports, diagnostic stderr handling is kept separate from the protocol stream
