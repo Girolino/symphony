@@ -1343,7 +1343,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     issue_id = "issue-mcp-elicitation-stall"
     issue = %Issue{id: issue_id, identifier: "MT-MCP", state: "In Progress"}
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1388,6 +1388,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     send(pid, :tick)
     state = wait_for_state(pid, fn state -> !Map.has_key?(state.running, issue_id) end, 1_000)
 
