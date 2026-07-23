@@ -1612,6 +1612,122 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner returns control when a follow-up turn start response times out" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-continuation-response-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-timeout.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-timeout.trace}"
+      turn_count=0
+
+      while IFS= read -r line; do
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-timeout"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            turn_count=$((turn_count + 1))
+            case "$turn_count" in
+              1)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-timeout-1"}}}'
+                printf '%s\\n' '{"method":"turn/completed"}'
+                ;;
+              *)
+                sleep 60
+                ;;
+            esac
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 1_000,
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :issue_state_fetch)
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-timeout",
+             identifier: "MT-249",
+             title: "Continue after timeout",
+             description: "Still active after first turn",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-timeout",
+        identifier: "MT-249",
+        title: "Continue after timeout",
+        description: "Still active after first turn",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-249",
+        labels: []
+      }
+
+      log =
+        capture_log(fn ->
+          assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        end)
+
+      assert_receive :issue_state_fetch
+      assert log =~ "follow-up Codex turn start failed"
+      assert log =~ ":response_timeout"
+
+      turn_start_requests =
+        trace_file
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["method"] == "turn/start"))
+
+      assert length(turn_start_requests) == 2
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner does not crash completed turns when Linear auth fails during state refresh" do
     test_root =
       Path.join(
