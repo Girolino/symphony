@@ -40,6 +40,9 @@ defmodule SymphonyElixir.TestSupport do
         previous_linear_auth_fallback_filer = Application.get_env(:symphony_elixir, :linear_auth_fallback_filer)
         previous_linear_graphql_client = Application.get_env(:symphony_elixir, :linear_graphql_client)
 
+        previous_workpad_bootstrap_lock_metadata_writer =
+          Application.get_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer)
+
         previous_agent_run_lease_reclaim_observer =
           Application.get_env(:symphony_elixir, :agent_run_lease_reclaim_observer)
 
@@ -80,6 +83,11 @@ defmodule SymphonyElixir.TestSupport do
           case previous_linear_graphql_client do
             nil -> Application.delete_env(:symphony_elixir, :linear_graphql_client)
             value -> Application.put_env(:symphony_elixir, :linear_graphql_client, value)
+          end
+
+          case previous_workpad_bootstrap_lock_metadata_writer do
+            nil -> Application.delete_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer)
+            value -> Application.put_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer, value)
           end
 
           case previous_agent_run_lease_reclaim_observer do

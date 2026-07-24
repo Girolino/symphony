@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
+  alias SymphonyElixir.Codex.WorkpadBootstrapGuard
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
@@ -58,7 +59,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     linear_client = linear_client(opts)
 
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
-         {:ok, response} <- linear_client.(query, variables, []) do
+         {:ok, response} <- WorkpadBootstrapGuard.execute(query, variables, linear_client) do
       graphql_response(response)
     else
       {:error, reason} ->
