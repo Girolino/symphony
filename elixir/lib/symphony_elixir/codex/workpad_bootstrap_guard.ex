@@ -46,6 +46,11 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   @workpad_marker "## Codex Workpad"
 
   @type linear_client :: (String.t(), map(), keyword() -> {:ok, map()} | {:error, term()})
+  @type lock :: %{
+          path: Path.t(),
+          token: String.t(),
+          issue_id: String.t()
+        }
 
   @spec execute(String.t(), map(), linear_client()) :: {:ok, map()} | {:error, term()}
   def execute(query, variables, linear_client)
@@ -239,11 +244,11 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     started_at = monotonic_ms()
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- acquire_lock(path, started_at) do
+         {:ok, lock} <- acquire_lock(path, started_at, issue_id) do
       try do
         fun.()
       after
-        release_lock(path)
+        release_lock(lock)
       end
     end
   rescue
@@ -251,57 +256,77 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
       {:error, error}
   end
 
-  defp acquire_lock(path, started_at) do
+  defp acquire_lock(path, started_at, issue_id) do
     case File.mkdir(path) do
       :ok ->
-        write_lock_metadata(path)
+        token = lock_token()
+
+        case write_lock_metadata(path, issue_id, token) do
+          :ok ->
+            {:ok, %{path: path, token: token, issue_id: issue_id}}
+
+          {:error, reason} ->
+            _ = remove_lock_path(path, issue_id, :metadata_failure)
+            {:error, {:workpad_bootstrap_lock_metadata_failed, path, reason}}
+        end
 
       {:error, :eexist} ->
-        handle_existing_lock(path, started_at)
+        handle_existing_lock(path, started_at, issue_id)
 
       {:error, reason} ->
         {:error, {:workpad_bootstrap_lock_create_failed, path, reason}}
     end
   end
 
-  defp handle_existing_lock(path, started_at) do
+  defp handle_existing_lock(path, started_at, issue_id) do
     cond do
       lock_stale?(path) ->
-        reclaim_and_reacquire_lock(path, started_at)
+        reclaim_and_reacquire_lock(path, started_at, issue_id)
 
       monotonic_ms() - started_at >= @lock_timeout_ms ->
         {:error, {:workpad_bootstrap_lock_timeout, path}}
 
       true ->
         Process.sleep(@retry_sleep_ms)
-        acquire_lock(path, started_at)
+        acquire_lock(path, started_at, issue_id)
     end
   end
 
-  defp reclaim_and_reacquire_lock(path, started_at) do
-    case reclaim_stale_lock(path) do
-      :ok -> acquire_lock(path, started_at)
+  defp reclaim_and_reacquire_lock(path, started_at, issue_id) do
+    case reclaim_stale_lock(path, issue_id) do
+      :ok -> acquire_lock(path, started_at, issue_id)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp write_lock_metadata(path) do
+  defp write_lock_metadata(path, issue_id, token) do
     metadata = %{
+      token: token,
+      issue_id: issue_id,
       owner_os_pid: System.pid(),
       owner_elixir_pid: self() |> :erlang.pid_to_list() |> List.to_string(),
       acquired_unix_ms: System.system_time(:millisecond)
     }
 
-    File.write!(Path.join(path, "owner.json"), Jason.encode!(metadata))
+    try do
+      with {:ok, encoded} <- Jason.encode(metadata),
+           :ok <- write_lock_metadata_file(Path.join(path, "owner.json"), encoded) do
+        :ok
+      else
+        {:error, reason} -> {:error, reason}
+      end
+    rescue
+      error in [File.Error, Jason.EncodeError] -> {:error, error}
+    end
   end
 
-  defp reclaim_stale_lock(path) do
+  defp reclaim_stale_lock(path, issue_id) do
     reclaimed_path = "#{path}.stale-#{System.unique_integer([:positive, :monotonic])}"
 
     case File.rename(path, reclaimed_path) do
       :ok ->
-        Logger.warning("Reclaiming stale workpad bootstrap lock path=#{path}")
-        release_lock(reclaimed_path)
+        Logger.warning("Reclaiming stale workpad bootstrap lock issue_id=#{issue_id} path=#{path}")
+        remove_lock_path(reclaimed_path, issue_id, :stale_reclaim)
 
       {:error, :enoent} ->
         :ok
@@ -311,14 +336,36 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp release_lock(path) do
+  defp release_lock(%{path: path, token: token, issue_id: issue_id}) do
+    case read_lock_metadata(path) do
+      {:ok, %{"token" => ^token}} ->
+        remove_lock_path(path, issue_id, :release)
+
+      {:ok, _metadata} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Skipping workpad bootstrap lock release after metadata read failure " <>
+            "issue_id=#{issue_id} path=#{path} reason=#{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp remove_lock_path(path, issue_id, reason_context) do
     case File.rm_rf(path) do
       {:ok, _removed} ->
         :ok
 
       {:error, reason, failed_path} ->
-        Logger.error("Failed to remove workpad bootstrap lock path=#{path} failed_path=#{failed_path} reason=#{inspect(reason)}")
-        {:error, {:workpad_bootstrap_lock_remove_failed, failed_path, reason}}
+        Logger.error(
+          "Failed to remove workpad bootstrap lock issue_id=#{issue_id} path=#{path} " <>
+            "failed_path=#{failed_path} reason=#{inspect(reason)}"
+        )
+
+        {:error, {:workpad_bootstrap_lock_remove_failed, reason_context, failed_path, reason}}
     end
   end
 
@@ -329,6 +376,17 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
       _ ->
         false
+    end
+  end
+
+  defp read_lock_metadata(path) do
+    path
+    |> Path.join("owner.json")
+    |> File.read()
+    |> case do
+      {:ok, body} -> Jason.decode(body)
+      {:error, :enoent} -> {:error, :missing_metadata}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -363,5 +421,21 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp monotonic_ms do
     System.monotonic_time(:millisecond)
+  end
+
+  defp lock_token do
+    System.unique_integer([:positive, :monotonic])
+    |> Integer.to_string()
+  end
+
+  if Mix.env() == :test do
+    defp write_lock_metadata_file(path, body) do
+      case Application.get_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer) do
+        writer when is_function(writer, 2) -> writer.(path, body)
+        _ -> File.write(path, body)
+      end
+    end
+  else
+    defp write_lock_metadata_file(path, body), do: File.write(path, body)
   end
 end

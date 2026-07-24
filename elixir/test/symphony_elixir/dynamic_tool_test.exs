@@ -226,6 +226,56 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["newer-workpad"]
   end
 
+  test "linear_graphql workpad create preserves response when post-create duplicate resolution fails" do
+    created = %{
+      "body" => "## Codex Workpad\n\ncreated",
+      "createdAt" => "2026-07-24T12:00:02Z",
+      "id" => "created-workpad",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-07-24T12:00:02Z"
+    }
+
+    older = %{
+      "body" => "## Codex Workpad\n\nolder",
+      "createdAt" => "2026-07-24T12:00:01Z",
+      "id" => "older-workpad",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-07-24T12:00:01Z"
+    }
+
+    comments_response = %{"data" => %{"issue" => %{"comments" => %{"nodes" => [older, created]}}}}
+    lookup_counter = :counters.new(1, [])
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\ncreated"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comments(first: 50)") ->
+              :counters.add(lookup_counter, 1, 1)
+
+              case :counters.get(lookup_counter, 1) do
+                1 -> {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+                _ -> {:ok, comments_response}
+              end
+
+            String.contains?(query, "commentCreate") ->
+              {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => created}}}}
+
+            String.contains?(query, "commentResolve") ->
+              {:error, :resolve_after_create_failed}
+          end
+        end
+      )
+
+    assert response["success"] == true
+
+    assert Jason.decode!(response["output"]) == %{
+             "data" => %{"commentCreate" => %{"comment" => created, "success" => true}}
+           }
+  end
+
   test "linear_graphql workpad creates reclaim stale bootstrap locks" do
     workspace_root =
       Path.join(
@@ -256,6 +306,238 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
     refute File.exists?(lock_path)
+  end
+
+  test "linear_graphql workpad lock metadata write failures release the created lock" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-metadata-failure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-workpad-metadata-failure"
+    lock_path = workpad_lock_path(workspace_root, issue_id)
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    Application.put_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer, fn _path, _body ->
+      {:error, :eacces}
+    end)
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nmetadata failure", issue_id),
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not run when lock metadata cannot be written")
+        end
+      )
+
+    assert response["success"] == false
+    assert response["output"] =~ "workpad_bootstrap_lock_metadata_failed"
+    refute File.exists?(lock_path)
+
+    raised_issue_id = "issue-workpad-metadata-raise"
+    raised_lock_path = workpad_lock_path(workspace_root, raised_issue_id)
+
+    Application.put_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer, fn path, _body ->
+      raise File.Error, reason: :eacces, action: "write to file", path: path
+    end)
+
+    raised_response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nmetadata raise", raised_issue_id),
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not run when lock metadata writer raises")
+        end
+      )
+
+    assert raised_response["success"] == false
+    assert raised_response["output"] =~ "workpad_bootstrap_lock_metadata_failed"
+    refute File.exists?(raised_lock_path)
+  end
+
+  test "linear_graphql workpad create reports lock directory create failures" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-create-failure-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    issue_id = String.duplicate("a", 300)
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nlock create failure", issue_id),
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not run when lock directory creation fails")
+        end
+      )
+
+    assert response["success"] == false
+    assert response["output"] =~ "workpad_bootstrap_lock_create_failed"
+  end
+
+  test "linear_graphql workpad stale reclaim failures fail before calling Linear" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-reclaim-failure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-lock-reclaim-failure"
+    lock_path = workpad_lock_path(workspace_root, issue_id)
+    lock_parent = Path.dirname(lock_path)
+
+    on_exit(fn ->
+      File.chmod(lock_parent, 0o755)
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    File.mkdir_p!(lock_path)
+    File.write!(Path.join(lock_path, "owner.json"), "{}")
+    :ok = :file.change_time(lock_path, {{2020, 1, 1}, {0, 0, 0}})
+    File.chmod!(lock_parent, 0o555)
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nreclaim failure", issue_id),
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not run when stale lock reclaim fails")
+        end
+      )
+
+    assert response["success"] == false
+    assert response["output"] =~ "workpad_bootstrap_lock_reclaim_failed"
+  end
+
+  test "linear_graphql stale reclaim does not let an old holder remove a newer lock" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-owned-lock-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-owned-lock"
+    table = :ets.new(:workpad_bootstrap_guard_owned_lock, [:public])
+    lock_path = workpad_lock_path(workspace_root, issue_id)
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    client = blocking_workpad_linear_client(table, self())
+
+    first =
+      Task.async(fn ->
+        "## Codex Workpad\n\nfirst"
+        |> workpad_create_args(issue_id)
+        |> execute_with_client(client)
+      end)
+
+    assert_receive {:blocking_comment_create_entered, first_pid}, 2_000
+    assert File.exists?(lock_path)
+    :ok = :file.change_time(lock_path, {{2020, 1, 1}, {0, 0, 0}})
+
+    second =
+      Task.async(fn ->
+        "## Codex Workpad\n\nsecond"
+        |> workpad_create_args(issue_id)
+        |> execute_with_client(client)
+      end)
+
+    assert_receive {:blocking_comment_create_entered, second_pid}, 2_000
+    refute first_pid == second_pid
+
+    send(first_pid, :release_workpad_comment_create)
+    assert first |> Task.await(5_000) |> output()
+    assert File.exists?(lock_path)
+
+    send(second_pid, :release_workpad_comment_create)
+    assert second |> Task.await(5_000) |> output()
+
+    refute File.exists?(lock_path)
+    assert length(active_workpad_ids(table)) == 1
+  end
+
+  test "linear_graphql workpad release leaves lock in place when metadata disappears" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-missing-metadata-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-missing-metadata"
+    lock_path = workpad_lock_path(workspace_root, issue_id)
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    table = :ets.new(:workpad_missing_metadata, [:public])
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nmissing metadata", issue_id),
+        linear_client: fn query, variables, opts ->
+          if String.contains?(query, "commentCreate") do
+            File.rm!(Path.join(lock_path, "owner.json"))
+          end
+
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      )
+
+    assert response["success"] == true
+    assert File.exists?(lock_path)
+  end
+
+  test "linear_graphql workpad release leaves lock in place when metadata cannot be read" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-unreadable-metadata-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-unreadable-metadata"
+    lock_path = workpad_lock_path(workspace_root, issue_id)
+    owner_path = Path.join(lock_path, "owner.json")
+
+    on_exit(fn ->
+      File.chmod(owner_path, 0o600)
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    table = :ets.new(:workpad_unreadable_metadata, [:public])
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nunreadable metadata", issue_id),
+        linear_client: fn query, variables, opts ->
+          if String.contains?(query, "commentCreate") do
+            File.chmod!(owner_path, 0o000)
+          end
+
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      )
+
+    assert response["success"] == true
+    assert File.exists?(lock_path)
   end
 
   test "linear_graphql workpad creates without usable bootstrap inputs pass through unguarded" do
@@ -586,7 +868,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
-  defp workpad_create_args(body) do
+  defp workpad_create_args(body, issue_id \\ "issue-workpad-race") do
     %{
       "query" => """
       mutation CreateWorkpad($input: CommentCreateInput!) {
@@ -602,7 +884,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         }
       }
       """,
-      "variables" => %{"input" => %{"issueId" => "issue-workpad-race", "body" => body}}
+      "variables" => %{"input" => %{"issueId" => issue_id, "body" => body}}
     }
   end
 
@@ -641,6 +923,24 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
         true ->
           {:ok, %{"data" => %{}}}
+      end
+    end
+  end
+
+  defp blocking_workpad_linear_client(table, test_pid) do
+    fn query, variables, opts ->
+      if String.contains?(query, "commentCreate") do
+        send(test_pid, {:blocking_comment_create_entered, self()})
+
+        receive do
+          :release_workpad_comment_create ->
+            handle_workpad_create(table, variables)
+        after
+          5_000 ->
+            {:error, :workpad_comment_create_timeout}
+        end
+      else
+        workpad_linear_client(table).(query, variables, opts)
       end
     end
   end
@@ -748,6 +1048,14 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   end
 
   defp lookup_workpad_comment(_table, _id), do: nil
+
+  defp workpad_lock_path(workspace_root, issue_id) do
+    Path.join([
+      Path.expand(workspace_root),
+      ".symphony-workpad-bootstrap-locks",
+      issue_id
+    ])
+  end
 
   defp map_get_input(map, key) do
     case Map.get(map, key) do
