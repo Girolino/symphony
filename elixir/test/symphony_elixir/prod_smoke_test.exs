@@ -340,6 +340,7 @@ defmodule SymphonyElixir.ProdSmokeTest do
             {:ok, 200, "<html>dashboard</html>"}
           end
         end,
+        port_free_fun: fn _port -> true end,
         spawn_fun: fn _escript, _workflow, _port, _env ->
           record(ctx.calls, :spawn)
           {:ok, %{fake: true}}
@@ -459,6 +460,16 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
   end
 
   defp opts(overrides) do
+    overrides
+    |> Keyword.put_new(:port_free_fun, fn _port -> true end)
+    |> raw_opts()
+  end
+
+  defp opts_with_real_port_preflight(overrides) do
+    raw_opts(overrides)
+  end
+
+  defp raw_opts(overrides) do
     dirs = ctx_dirs()
 
     Keyword.merge(
@@ -498,6 +509,12 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
          }
        }
      }}
+  end
+
+  defp occupied_loopback_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(socket)
+    {port, socket}
   end
 
   test "fails linear setup when the team is missing and still cleans up" do
@@ -597,11 +614,10 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
   end
 
   test "fails preflight when the port is occupied" do
-    port = 47_700 + rem(System.unique_integer([:positive]), 90)
-    {:ok, socket} = :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}])
+    {port, socket} = occupied_loopback_port()
     on_exit(fn -> :gen_tcp.close(socket) end)
 
-    assert {:error, report} = ProdSmoke.run(opts(port: port))
+    assert {:error, report} = ProdSmoke.run(opts_with_real_port_preflight(port: port))
     assert report.failure =~ "already in use"
   end
 
@@ -770,6 +786,8 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
 
   test "polls tolerate malformed issue payloads" do
     {:ok, polls} = Agent.start_link(fn -> 0 end)
+    {occupied_port, socket} = occupied_loopback_port()
+    on_exit(fn -> :gen_tcp.close(socket) end)
 
     weird = fn _e, _k, q, _v ->
       cond do
@@ -817,7 +835,7 @@ defmodule SymphonyElixir.ProdSmokeErrorPathsTest do
       end
     end
 
-    assert {:ok, report} = ProdSmoke.run(opts(graphql_fun: weird, timeout_ms: 5_000))
+    assert {:ok, report} = ProdSmoke.run(opts(port: occupied_port, graphql_fun: weird, timeout_ms: 5_000))
     assert report.result == :pass
   end
 
