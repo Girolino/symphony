@@ -388,6 +388,7 @@ defmodule SymphonyElixir.ProdSmoke do
       http_get_fun: Keyword.get(opts, :http_get_fun, &OpsTransport.http_get/1),
       spawn_fun: Keyword.get(opts, :spawn_fun, &OpsTransport.spawn_daemon/4),
       stop_fun: Keyword.get(opts, :stop_fun, &OpsTransport.stop_daemon/1),
+      port_free_fun: Keyword.get(opts, :port_free_fun, &port_free?/1),
       sleep_fun: Keyword.get(opts, :sleep_fun, &Process.sleep/1),
       get_env: get_env,
       bootstrap_path: Keyword.get(opts, :bootstrap_path, default_bootstrap_path())
@@ -445,7 +446,7 @@ defmodule SymphonyElixir.ProdSmoke do
           not File.exists?(context.escript_path) ->
             {:fail, "escript missing at #{context.escript_path}; run `mix build` first", nil}
 
-          not port_free?(context.port) ->
+          not context.port_free_fun.(context.port) ->
             {:fail, "port #{context.port} is already in use", nil}
 
           true ->
