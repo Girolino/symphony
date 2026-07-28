@@ -115,66 +115,63 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  # SPEC 11.4: a running-state refresh failure must never kill an in-flight agent
+  # run. A completed Codex turn is already-paid-for model spend; discarding it
+  # because Linear rate-limited a read costs a full-context re-send on retry.
+  #
+  # There is deliberately NO retry loop here. The tracker adapter owns rate-limit
+  # handling (SPEC 11.4) and Linear.Client already retries with backoff under an
+  # enforced total budget; a second loop on top multiplies both the request count
+  # against an API that is throttling us and the blocking time at the turn
+  # boundary - long enough for the orchestrator stall watchdog
+  # (codex.stall_timeout_ms) to read the silence as a hung run and kill it, which
+  # is exactly the paid-turn loss this code exists to prevent.
+  #
+  # Degrading to the stale snapshot is bounded: a stale snapshot makes both
+  # terminal-state and role-boundary detection blind (role_boundary_crossed?
+  # would compare the snapshot's state to itself), so after @max_degraded_turns
+  # consecutive blind boundaries the run ends and the orchestrator poll loop -
+  # which sees fresh state - reconciles.
+  @max_degraded_turns 1
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+      ctx = %{
+        app_session: session,
+        workspace: workspace,
+        codex_update_recipient: codex_update_recipient,
+        opts: opts,
+        issue_state_fetcher: issue_state_fetcher
+      }
+
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(ctx, issue, %{number: 1, max: max_turns, degraded: 0})
       after
         AppServer.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_codex_turns(ctx, issue, %{number: turn_number, max: max_turns} = turn) do
+    prompt = build_turn_prompt(issue, ctx.opts, turn_number, max_turns)
 
     case AppServer.run_turn(
-           app_session,
+           ctx.app_session,
            prompt,
            issue,
-           on_message: codex_message_handler(codex_update_recipient, issue)
+           on_message: codex_message_handler(ctx.codex_update_recipient, issue)
          ) do
       {:ok, turn_session} ->
-        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{ctx.workspace} turn=#{turn_number}/#{max_turns}")
 
-        case continue_with_issue?(issue, issue_state_fetcher) do
-          {:continue, refreshed_issue} when turn_number < max_turns ->
-            ctx = %{
-              app_session: app_session,
-              workspace: workspace,
-              codex_update_recipient: codex_update_recipient,
-              opts: opts,
-              issue_state_fetcher: issue_state_fetcher,
-              max_turns: max_turns
-            }
-
-            continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, turn_number)
-
-          {:continue, refreshed_issue} ->
-            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-            :ok
-
-          {:done, _refreshed_issue} ->
-            :ok
-
-          {:defer, reason} ->
-            Logger.warning(
-              "post-turn issue-state refresh failed for #{issue_context(issue)} session_id=#{turn_session[:session_id]}: #{inspect(reason)}; returning control to orchestrator continuation retry"
-            )
-
-            :ok
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        handle_turn_boundary(ctx, issue, turn_session, turn)
 
       {:error, :response_timeout} when turn_number > 1 ->
         Logger.warning(
-          "follow-up Codex turn start failed for #{issue_context(issue)} thread_id=#{app_session[:thread_id]} turn=#{turn_number}/#{max_turns}: :response_timeout; returning control to orchestrator continuation retry"
+          "follow-up Codex turn start failed for #{issue_context(issue)} thread_id=#{ctx.app_session[:thread_id]} turn=#{turn_number}/#{max_turns}: :response_timeout; returning control to orchestrator continuation retry"
         )
 
         :ok
@@ -184,24 +181,62 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, turn_number) do
+  defp handle_turn_boundary(ctx, issue, turn_session, %{number: turn_number, max: max_turns, degraded: degraded_turns} = turn) do
+    case continue_with_issue?(issue, ctx.issue_state_fetcher, degraded_turns) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, turn)
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+        :ok
+
+      {:degraded_continue, stale_issue} when turn_number < max_turns ->
+        continue_on_stale_snapshot(ctx, stale_issue, turn)
+
+      {:degraded_continue, stale_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(stale_issue)} on a stale snapshot; returning control to orchestrator")
+
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:defer, reason} ->
+        Logger.warning(
+          "post-turn issue-state refresh failed for #{issue_context(issue)} session_id=#{turn_session[:session_id]}: " <>
+            "#{inspect(reason)}; returning control to orchestrator continuation retry"
+        )
+
+        :ok
+    end
+  end
+
+  # The snapshot is stale, so terminal-state and role-boundary detection are both
+  # blind this turn. Continue anyway - the completed turn is already paid for -
+  # and let @max_degraded_turns end the run if the next boundary cannot refresh
+  # either, so a cancelled issue cannot keep burning turns unnoticed.
+  defp continue_on_stale_snapshot(ctx, stale_issue, %{number: turn_number, max: max_turns, degraded: degraded_turns} = turn) do
+    Logger.warning(
+      "continuing agent run for #{issue_context(stale_issue)} on a stale issue snapshot " <>
+        "turn=#{turn_number}/#{max_turns} degraded=#{degraded_turns + 1}/#{@max_degraded_turns}; " <>
+        "terminal-state and role-boundary detection are blind until a refresh succeeds"
+    )
+
+    do_run_codex_turns(ctx, stale_issue, %{turn | number: turn_number + 1, degraded: degraded_turns + 1})
+  end
+
+  defp continue_or_end_at_role_boundary(ctx, issue, refreshed_issue, %{number: turn_number, max: max_turns} = turn) do
     if role_boundary_crossed?(issue.state, refreshed_issue.state) do
       Logger.info("Ending session at role boundary for #{issue_context(refreshed_issue)}: #{inspect(issue.state)} -> #{inspect(refreshed_issue.state)}; a fresh session will own the new role")
 
       :ok
     else
-      Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{ctx.max_turns}")
+      Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-      do_run_codex_turns(
-        ctx.app_session,
-        ctx.workspace,
-        refreshed_issue,
-        ctx.codex_update_recipient,
-        ctx.opts,
-        ctx.issue_state_fetcher,
-        turn_number + 1,
-        ctx.max_turns
-      )
+      # a successful refresh clears the degraded budget: the bound is on
+      # consecutive blind boundaries, not on the run as a whole
+      do_run_codex_turns(ctx, refreshed_issue, %{turn | number: turn_number + 1, degraded: 0})
     end
   end
 
@@ -237,7 +272,8 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, degraded_turns)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if active_issue_state?(refreshed_issue.state) do
@@ -250,15 +286,38 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, issue}
 
       {:error, reason} ->
-        if Client.auth_failure?(reason) do
-          {:defer, reason}
-        else
-          {:error, {:issue_state_refresh_failed, reason}}
+        cond do
+          Client.auth_failure?(reason) ->
+            {:defer, reason}
+
+          degraded_turns < @max_degraded_turns ->
+            Logger.warning(
+              "post-turn issue-state refresh failed for #{issue_context(issue)}: #{inspect(reason)}; " <>
+                "continuing with the stale issue snapshot per SPEC 11.4 instead of failing the run"
+            )
+
+            {:degraded_continue, issue}
+
+          true ->
+            Logger.warning(
+              "post-turn issue-state refresh failed for #{issue_context(issue)}: #{inspect(reason)} " <>
+                "after #{degraded_turns} degraded turn(s); ending the run so the orchestrator poll loop " <>
+                "reconciles instead of burning more turns blind"
+            )
+
+            {:done, issue}
         end
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _issue_state_fetcher, _degraded_turns), do: {:done, issue}
+
+  @doc false
+  @spec continue_with_issue_for_test(Issue.t(), (list() -> term()), keyword()) ::
+          {:continue, Issue.t()} | {:degraded_continue, Issue.t()} | {:done, Issue.t()} | {:defer, term()}
+  def continue_with_issue_for_test(issue, issue_state_fetcher, opts \\ []) do
+    continue_with_issue?(issue, issue_state_fetcher, Keyword.get(opts, :degraded_turns, 0))
+  end
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
