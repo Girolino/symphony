@@ -140,7 +140,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, turn_session} ->
         Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-        case continue_with_issue?(issue, issue_state_fetcher) do
+        case continue_with_issue?(issue, issue_state_fetcher, Keyword.get(opts, :sleep_fun, &Process.sleep/1)) do
           {:continue, refreshed_issue} when turn_number < max_turns ->
             ctx = %{
               app_session: app_session,
@@ -167,9 +167,6 @@ defmodule SymphonyElixir.AgentRunner do
             )
 
             :ok
-
-          {:error, reason} ->
-            {:error, reason}
         end
 
       {:error, :response_timeout} when turn_number > 1 ->
@@ -237,7 +234,23 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  # SPEC 11.4: a running-state refresh failure must never kill an in-flight agent
+  # run. A completed Codex turn is already-paid-for model spend; discarding it
+  # because Linear rate-limited a read costs a full-context re-send on retry.
+  # Retry the read a small bounded number of times, then degrade to the stale
+  # snapshot and let the orchestrator poll loop reconcile terminal state.
+  @refresh_max_attempts 3
+  @refresh_base_backoff_ms 2_000
+  @refresh_max_backoff_ms 8_000
+
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, sleep_fun)
+       when is_binary(issue_id) do
+    refresh_issue_state(issue, issue_state_fetcher, sleep_fun, 1)
+  end
+
+  defp continue_with_issue?(issue, _issue_state_fetcher, _sleep_fun), do: {:done, issue}
+
+  defp refresh_issue_state(%Issue{id: issue_id} = issue, issue_state_fetcher, sleep_fun, attempt) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if active_issue_state?(refreshed_issue.state) do
@@ -250,15 +263,48 @@ defmodule SymphonyElixir.AgentRunner do
         {:done, issue}
 
       {:error, reason} ->
-        if Client.auth_failure?(reason) do
-          {:defer, reason}
-        else
-          {:error, {:issue_state_refresh_failed, reason}}
+        cond do
+          Client.auth_failure?(reason) ->
+            {:defer, reason}
+
+          attempt < @refresh_max_attempts ->
+            delay = refresh_backoff_ms(attempt, reason)
+
+            Logger.warning(
+              "post-turn issue-state refresh attempt #{attempt}/#{@refresh_max_attempts} failed for #{issue_context(issue)}: #{inspect(reason)}; retrying in #{delay}ms"
+            )
+
+            sleep_fun.(delay)
+            refresh_issue_state(issue, issue_state_fetcher, sleep_fun, attempt + 1)
+
+          true ->
+            Logger.warning(
+              "post-turn issue-state refresh failed for #{issue_context(issue)} after #{@refresh_max_attempts} attempts: #{inspect(reason)}; continuing with the stale issue snapshot per SPEC 11.4 instead of failing the run"
+            )
+
+            {:continue, issue}
         end
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  @doc false
+  @spec refresh_backoff_ms(pos_integer(), term()) :: pos_integer()
+  def refresh_backoff_ms(attempt, reason) when is_integer(attempt) and attempt >= 1 do
+    case retry_after_ms(reason) do
+      ms when is_integer(ms) and ms > 0 -> min(ms, @refresh_max_backoff_ms)
+      _ -> min(@refresh_base_backoff_ms * Integer.pow(2, attempt - 1), @refresh_max_backoff_ms)
+    end
+  end
+
+  defp retry_after_ms({:tracker_rate_limited, %{retry_after_ms: ms}}), do: ms
+  defp retry_after_ms(_reason), do: nil
+
+  @doc false
+  @spec continue_with_issue_for_test(Issue.t(), (list() -> term()), keyword()) ::
+          {:continue, Issue.t()} | {:done, Issue.t()} | {:defer, term()}
+  def continue_with_issue_for_test(issue, issue_state_fetcher, opts \\ []) do
+    continue_with_issue?(issue, issue_state_fetcher, Keyword.get(opts, :sleep_fun, &Process.sleep/1))
+  end
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)

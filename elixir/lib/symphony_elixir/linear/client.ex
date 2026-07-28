@@ -203,8 +203,19 @@ defmodule SymphonyElixir.Linear.Client do
   # makes polling/reconciliation fail spuriously. Back off and retry a bounded
   # number of times so transient throttling degrades gracefully instead of
   # failing the operation.
-  @rate_limit_max_retries 4
+  #
+  # Bounds are deliberately small: the goal is to reduce QPS against Linear while
+  # it is throttling us, not to amplify it. Worst case added latency is capped by
+  # @retry_total_budget_ms.
+  @rate_limit_max_retries 3
   @rate_limit_base_backoff_ms 2_000
+  @rate_limit_max_backoff_ms 16_000
+  @retry_total_budget_ms 30_000
+  @retry_jitter_fraction 0.2
+
+  # Transport failures Linear/Req surface for a dropped or timed-out connection.
+  # These are safe to retry; anything else (TLS/DNS/config errors) is not.
+  @retryable_transport_reasons [:closed, :timeout, :econnreset, :econnrefused, :ehostunreach]
 
   defp do_graphql(payload, request_fun, sleep_fun, attempt) do
     case graphql_headers() do
@@ -254,34 +265,119 @@ defmodule SymphonyElixir.Linear.Client do
     log_and_fail(payload, response)
   end
 
-  defp handle_graphql_result({:error, reason}, _payload, _request_fun, _sleep_fun, _attempt, _token) do
-    Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
-    {:error, {:linear_api_request, reason}}
+  defp handle_graphql_result({:error, reason}, payload, request_fun, sleep_fun, attempt, _token) do
+    if retryable_transport_error?(reason) and attempt < @rate_limit_max_retries do
+      Logger.warning("Linear GraphQL transport error #{inspect(reason)}; retrying")
+      backoff_and_retry(payload, request_fun, sleep_fun, attempt, nil)
+    else
+      Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+      {:error, {:linear_api_request, reason}}
+    end
   end
 
   defp maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt) do
-    if rate_limited_body?(body) and attempt < @rate_limit_max_retries do
-      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
-    else
-      {:ok, body}
+    cond do
+      not rate_limited_body?(body) ->
+        {:ok, body}
+
+      attempt < @rate_limit_max_retries ->
+        backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(%{status: 200, body: body}))
+
+      true ->
+        rate_limited_error(payload, %{status: 200, body: body})
     end
   end
 
   defp maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, attempt) do
-    if rate_limited_body?(response.body) and attempt < @rate_limit_max_retries do
-      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
-    else
-      log_and_fail(payload, response)
+    cond do
+      not rate_limited_body?(response.body) ->
+        log_and_fail(payload, response)
+
+      attempt < @rate_limit_max_retries ->
+        backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(response))
+
+      true ->
+        rate_limited_error(payload, response)
     end
   end
 
   defp maybe_retry_status(payload, request_fun, sleep_fun, attempt, response) do
     if attempt < @rate_limit_max_retries do
-      backoff_and_retry(payload, request_fun, sleep_fun, attempt)
+      backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(response))
     else
-      log_and_fail(payload, response)
+      rate_limited_error(payload, response)
     end
   end
+
+  # Distinct, adapter-owned rate-limit category (SPEC 11.4). Callers that only
+  # match {:linear_api_status, _} keep working through their catch-all clauses,
+  # while retry-aware callers (AgentRunner turn boundary) can honor retry_after_ms.
+  defp rate_limited_error(payload, response) do
+    status = Map.get(response, :status)
+
+    Logger.error(
+      "Linear GraphQL request rate limited after #{@rate_limit_max_retries} retries status=#{status}" <>
+        linear_error_context(payload, response)
+    )
+
+    {:error, {:tracker_rate_limited, %{status: status, retry_after_ms: retry_after_ms(response)}}}
+  end
+
+  @doc false
+  @spec retryable_transport_error?(term()) :: boolean()
+  def retryable_transport_error?(%{__struct__: Req.TransportError, reason: reason}),
+    do: reason in @retryable_transport_reasons
+
+  def retryable_transport_error?(%{__struct__: Mint.TransportError, reason: reason}),
+    do: reason in @retryable_transport_reasons
+
+  def retryable_transport_error?(_reason), do: false
+
+  @doc false
+  @spec retry_after_ms(map()) :: pos_integer() | nil
+  def retry_after_ms(response) when is_map(response) do
+    header_retry_after_ms(Map.get(response, :headers)) || body_retry_after_ms(Map.get(response, :body))
+  end
+
+  defp header_retry_after_ms(headers) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn {name, value} ->
+      if String.downcase(to_string(name)) == "retry-after", do: value
+    end)
+    |> seconds_header_to_ms()
+  end
+
+  defp header_retry_after_ms(headers) when is_list(headers) do
+    header_retry_after_ms(Map.new(headers))
+  end
+
+  defp header_retry_after_ms(_headers), do: nil
+
+  defp seconds_header_to_ms([value | _]), do: seconds_header_to_ms(value)
+
+  defp seconds_header_to_ms(value) when is_binary(value) do
+    case Float.parse(value) do
+      {seconds, _rest} when seconds > 0 -> round(seconds * 1_000)
+      _ -> nil
+    end
+  end
+
+  defp seconds_header_to_ms(value) when is_integer(value) and value > 0, do: value * 1_000
+  defp seconds_header_to_ms(_value), do: nil
+
+  defp body_retry_after_ms(%{"errors" => errors}) when is_list(errors) do
+    Enum.find_value(errors, fn error ->
+      extensions = get_in(error, ["extensions"]) || %{}
+
+      cond do
+        is_integer(extensions["retryAfterMs"]) and extensions["retryAfterMs"] > 0 -> extensions["retryAfterMs"]
+        is_number(extensions["retryAfter"]) and extensions["retryAfter"] > 0 -> round(extensions["retryAfter"] * 1_000)
+        true -> nil
+      end
+    end)
+  end
+
+  defp body_retry_after_ms(_body), do: nil
 
   defp maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response) do
     case Auth.fallback_api_key(token) do
@@ -345,11 +441,37 @@ defmodule SymphonyElixir.Linear.Client do
     {:error, {:linear_api_request, reason}}
   end
 
-  defp backoff_and_retry(payload, request_fun, sleep_fun, attempt) do
-    delay = @rate_limit_base_backoff_ms * Integer.pow(2, attempt)
-    Logger.warning("Linear rate-limited; backing off #{delay}ms (attempt #{attempt + 1}/#{@rate_limit_max_retries})")
+  defp backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms) do
+    delay = retry_delay_ms(attempt, retry_after_ms)
+
+    Logger.warning(
+      "Linear request backing off #{delay}ms (attempt #{attempt + 1}/#{@rate_limit_max_retries})" <>
+        if(is_integer(retry_after_ms), do: " retry_after_ms=#{retry_after_ms}", else: "")
+    )
+
     sleep_fun.(delay)
     do_graphql(payload, request_fun, sleep_fun, attempt + 1)
+  end
+
+  @doc """
+  Pure backoff computation: exponential with jitter, honoring a server-provided
+  retry-after hint, clamped so the worst-case total added latency across the
+  bounded retry budget stays under #{@retry_total_budget_ms}ms.
+  """
+  @spec retry_delay_ms(non_neg_integer(), pos_integer() | nil) :: pos_integer()
+  def retry_delay_ms(attempt, retry_after_ms \\ nil) when is_integer(attempt) and attempt >= 0 do
+    base =
+      case retry_after_ms do
+        ms when is_integer(ms) and ms > 0 -> ms
+        _ -> @rate_limit_base_backoff_ms * Integer.pow(2, attempt)
+      end
+
+    jittered = base + :rand.uniform(max(round(base * @retry_jitter_fraction), 1))
+
+    jittered
+    |> min(@rate_limit_max_backoff_ms)
+    |> min(@retry_total_budget_ms)
+    |> max(1)
   end
 
   defp rate_limited_body?(%{"errors" => errors}) when is_list(errors) do

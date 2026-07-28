@@ -68,11 +68,125 @@ defmodule SymphonyElixir.Linear.ClientTest do
              Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
   end
 
-  test "gives up after the retry budget and returns the status error" do
-    request_fun = fn _payload, _headers -> {:ok, %{status: 400, body: @ratelimited}} end
+  test "gives up after the retry budget with a distinct tracker_rate_limited error" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:ok, %{status: 400, body: @ratelimited}}
+    end
+
+    assert {:error, {:tracker_rate_limited, %{status: 400, retry_after_ms: nil}}} =
+             Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+
+    # bounded: initial attempt + 3 retries, never an unbounded hammer loop
+    assert Agent.get(counter, & &1) == 4
+  end
+
+  test "an exhausted RATELIMITED 200 body fails instead of masquerading as success" do
+    request_fun = fn _payload, _headers -> {:ok, %{status: 200, body: @ratelimited}} end
+
+    assert {:error, {:tracker_rate_limited, %{status: 200}}} =
+             Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+  end
+
+  test "handles HTTP 429 with retries and surfaces Retry-After from headers" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+    {:ok, delays} = Agent.start_link(fn -> [] end)
+
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:ok, %{status: 429, headers: %{"retry-after" => ["3"]}, body: %{}}}
+    end
+
+    assert {:error, {:tracker_rate_limited, %{status: 429, retry_after_ms: 3_000}}} =
+             Client.graphql("query { x }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn ms -> Agent.update(delays, &[ms | &1]) end
+             )
+
+    assert Agent.get(counter, & &1) == 4
+
+    recorded = Agent.get(delays, &Enum.reverse/1)
+    assert length(recorded) == 3
+    # Retry-After (3s) is honored, not the smaller default first backoff (2s)
+    assert Enum.all?(recorded, fn ms -> ms >= 3_000 and ms <= 3_600 end)
+  end
+
+  test "429 succeeds once the throttle clears" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    request_fun = fn _payload, _headers ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+
+      if n < 1,
+        do: {:ok, %{status: 429, body: %{}}},
+        else: {:ok, %{status: 200, body: %{"data" => %{"ok" => true}}}}
+    end
+
+    assert {:ok, %{"data" => %{"ok" => true}}} =
+             Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+  end
+
+  test "retries a transient transport close and then succeeds" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    request_fun = fn _payload, _headers ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+
+      if n < 2,
+        do: {:error, %Req.TransportError{reason: :closed}},
+        else: {:ok, %{status: 200, body: %{"data" => %{"ok" => true}}}}
+    end
+
+    assert {:ok, %{"data" => %{"ok" => true}}} =
+             Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+
+    assert Agent.get(counter, & &1) == 3
+  end
+
+  test "a non-retryable transport error fails through unchanged" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:error, %Req.TransportError{reason: :nxdomain}}
+    end
+
+    assert {:error, {:linear_api_request, %Req.TransportError{reason: :nxdomain}}} =
+             Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+
+    assert Agent.get(counter, & &1) == 1
+  end
+
+  test "a non-rate-limit GraphQL validation error is not retried" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    body = %{"errors" => [%{"extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}}]}
+
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:ok, %{status: 400, body: body}}
+    end
 
     assert {:error, {:linear_api_status, 400}} =
              Client.graphql("query { x }", %{}, request_fun: request_fun, sleep_fun: fn _ -> :ok end)
+
+    assert Agent.get(counter, & &1) == 1
+  end
+
+  test "retry backoff is exponential, jittered, and bounded" do
+    first = for _ <- 1..50, do: Client.retry_delay_ms(0)
+    second = for _ <- 1..50, do: Client.retry_delay_ms(1)
+
+    assert Enum.all?(first, fn ms -> ms > 2_000 and ms <= 2_400 end)
+    assert Enum.all?(second, fn ms -> ms > 4_000 and ms <= 4_800 end)
+    # jitter is real, not a constant
+    assert Enum.uniq(first) |> length() > 1
+    # server hint wins, and everything stays clamped well under the 30s budget
+    assert Client.retry_delay_ms(0, 5_000) >= 5_000
+    assert Client.retry_delay_ms(9, nil) <= 16_000
+    assert Client.retry_delay_ms(0, 600_000) <= 16_000
   end
 
   test "a non-rate-limit error is not retried" do

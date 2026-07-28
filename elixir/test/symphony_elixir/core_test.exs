@@ -1179,15 +1179,22 @@ defmodule SymphonyElixir.CoreTest do
     end)
   end
 
-  test "agent runner still raises non-auth post-turn issue refresh failures" do
+  test "agent runner keeps the completed run alive when post-turn refresh keeps failing (SPEC 11.4)" do
     with_completed_turn_agent_runner_fixture("state-refresh", fn issue ->
-      assert_raise RuntimeError, ~r/issue_state_refresh_failed, {:linear_api_status, 500}/, fn ->
-        AgentRunner.run(
-          issue,
-          nil,
-          issue_state_fetcher: fn [_issue_id] -> {:error, {:linear_api_status, 500}} end
-        )
-      end
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   AgentRunner.run(
+                     issue,
+                     nil,
+                     issue_state_fetcher: fn [_issue_id] -> {:error, {:linear_api_status, 500}} end,
+                     sleep_fun: fn _ -> :ok end,
+                     max_turns: 1
+                   )
+        end)
+
+      assert log =~ "continuing with the stale issue snapshot"
+      refute log =~ "issue_state_refresh_failed"
     end)
   end
 
