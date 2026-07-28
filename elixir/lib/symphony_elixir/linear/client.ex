@@ -168,7 +168,7 @@ defmodule SymphonyElixir.Linear.Client do
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
     sleep_fun = Keyword.get(opts, :sleep_fun, &Process.sleep/1)
 
-    do_graphql(payload, request_fun, sleep_fun, 0)
+    do_graphql(payload, request_fun, sleep_fun, %{attempt: 0, spent_ms: 0})
   end
 
   @spec validate_auth() :: :ok | {:error, term()}
@@ -205,38 +205,49 @@ defmodule SymphonyElixir.Linear.Client do
   # failing the operation.
   #
   # Bounds are deliberately small: the goal is to reduce QPS against Linear while
-  # it is throttling us, not to amplify it. Worst case added latency is capped by
-  # @retry_total_budget_ms.
+  # it is throttling us, not to amplify it. This is the ONLY retry layer in the
+  # stack:
+  #   - Req is called with `retry: false` (post_graphql_request/2) so it adds no
+  #     attempts of its own.
+  #   - Callers (AgentRunner turn boundary, orchestrator poll loop) must not wrap
+  #     this in a second retry loop; layered loops multiply attempts and blocking
+  #     time against an API that is already throttling us.
+  # @retry_total_budget_ms is enforced (not decorative): cumulative slept time is
+  # threaded through the retry state and retrying stops once the budget is spent,
+  # so worst-case added latency per graphql/3 call stays under it.
   @rate_limit_max_retries 3
   @rate_limit_base_backoff_ms 2_000
-  @rate_limit_max_backoff_ms 16_000
-  @retry_total_budget_ms 30_000
-  @retry_jitter_fraction 0.2
+  @rate_limit_max_backoff_ms 8_000
+  @retry_total_budget_ms 15_000
+  # Jitter on a server hint only needs to decorrelate concurrent daemons, not to
+  # reshape the delay; the exponential ladder uses equal jitter instead (see
+  # retry_delay_ms/2).
+  @retry_hint_jitter_ms 1_000
 
   # Transport failures Linear/Req surface for a dropped or timed-out connection.
   # These are safe to retry; anything else (TLS/DNS/config errors) is not.
   @retryable_transport_reasons [:closed, :timeout, :econnreset, :econnrefused, :ehostunreach]
 
-  defp do_graphql(payload, request_fun, sleep_fun, attempt) do
+  defp do_graphql(payload, request_fun, sleep_fun, retry) do
     case graphql_headers() do
       {:ok, token, headers} ->
-        do_graphql_with_headers(payload, request_fun, sleep_fun, attempt, token, headers)
+        do_graphql_with_headers(payload, request_fun, sleep_fun, retry, token, headers)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp do_graphql_with_headers(payload, request_fun, sleep_fun, attempt, token, headers) do
+  defp do_graphql_with_headers(payload, request_fun, sleep_fun, retry, token, headers) do
     request_fun.(payload, headers)
-    |> handle_graphql_result(payload, request_fun, sleep_fun, attempt, token)
+    |> handle_graphql_result(payload, request_fun, sleep_fun, retry, token)
   end
 
-  defp handle_graphql_result({:ok, %{status: 200, body: body} = response}, payload, request_fun, sleep_fun, attempt, token) do
+  defp handle_graphql_result({:ok, %{status: 200, body: body} = response}, payload, request_fun, sleep_fun, retry, token) do
     if auth_error_body?(body) do
-      maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response)
+      maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, retry, token, response)
     else
-      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, retry, response)
     end
   end
 
@@ -245,69 +256,112 @@ defmodule SymphonyElixir.Linear.Client do
          payload,
          request_fun,
          sleep_fun,
-         attempt,
+         retry,
          token
        )
        when status in [401, 403] do
-    maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response)
+    maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, retry, token, response)
   end
 
-  defp handle_graphql_result({:ok, %{status: status} = response}, payload, request_fun, sleep_fun, attempt, _token)
+  defp handle_graphql_result({:ok, %{status: status} = response}, payload, request_fun, sleep_fun, retry, _token)
        when status in [429] do
-    maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
+    maybe_retry_status(payload, request_fun, sleep_fun, retry, response)
   end
 
-  defp handle_graphql_result({:ok, %{status: 400} = response}, payload, request_fun, sleep_fun, attempt, _token) do
-    maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, attempt)
+  defp handle_graphql_result({:ok, %{status: 400} = response}, payload, request_fun, sleep_fun, retry, _token) do
+    maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, retry)
   end
 
   defp handle_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token) do
     log_and_fail(payload, response)
   end
 
-  defp handle_graphql_result({:error, reason}, payload, request_fun, sleep_fun, attempt, _token) do
-    if retryable_transport_error?(reason) and attempt < @rate_limit_max_retries do
-      Logger.warning("Linear GraphQL transport error #{inspect(reason)}; retrying")
-      backoff_and_retry(payload, request_fun, sleep_fun, attempt, nil)
+  # A dropped/timed-out POST may well have been applied server-side before the
+  # response was lost, so replaying it can duplicate a write (commentCreate,
+  # issueUpdate, issueCreate, or anything an agent sends through the raw
+  # linear_graphql tool). This is exactly why Req's default `retry:
+  # :safe_transient` only retries GET/HEAD. Retry transport failures for read
+  # documents only; mutations fail through on the first transport error as before.
+  defp handle_graphql_result({:error, reason}, payload, request_fun, sleep_fun, retry, _token) do
+    if retryable_transport_error?(reason) and idempotent_payload?(payload) do
+      case retry_decision(retry, nil) do
+        {:retry, delay} ->
+          Logger.warning("Linear GraphQL transport error #{inspect(reason)}; retrying")
+          backoff_and_retry(payload, request_fun, sleep_fun, retry, delay, nil)
+
+        :exhausted ->
+          Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+          {:error, {:linear_api_request, reason}}
+      end
     else
       Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
       {:error, {:linear_api_request, reason}}
     end
   end
 
-  defp maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt) do
-    cond do
-      not rate_limited_body?(body) ->
-        {:ok, body}
-
-      attempt < @rate_limit_max_retries ->
-        backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(%{status: 200, body: body}))
-
-      true ->
-        rate_limited_error(payload, %{status: 200, body: body})
+  # Keep the whole response: the Retry-After hint lives in the HTTP headers even
+  # when Linear reports the throttle as a 200 with a RATELIMITED error body, so
+  # rebuilding a synthetic %{status: 200, body: body} here would silently discard
+  # the server hint on Linear's most common rate-limit shape.
+  defp maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, retry, response) do
+    if rate_limited_body?(body) do
+      retry_rate_limited(payload, request_fun, sleep_fun, retry, response)
+    else
+      {:ok, body}
     end
   end
 
-  defp maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, attempt) do
-    cond do
-      not rate_limited_body?(response.body) ->
-        log_and_fail(payload, response)
+  defp maybe_retry_rate_limited_response(response, payload, request_fun, sleep_fun, retry) do
+    if rate_limited_body?(response.body) do
+      retry_rate_limited(payload, request_fun, sleep_fun, retry, response)
+    else
+      log_and_fail(payload, response)
+    end
+  end
 
-      attempt < @rate_limit_max_retries ->
-        backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(response))
+  defp maybe_retry_status(payload, request_fun, sleep_fun, retry, response) do
+    retry_rate_limited(payload, request_fun, sleep_fun, retry, response)
+  end
 
-      true ->
+  # A rate-limited request was rejected, never applied, so replaying it is safe
+  # for mutations too.
+  defp retry_rate_limited(payload, request_fun, sleep_fun, retry, response) do
+    hint = retry_after_ms(response)
+
+    case retry_decision(retry, hint) do
+      {:retry, delay} ->
+        backoff_and_retry(payload, request_fun, sleep_fun, retry, delay, hint)
+
+      :exhausted ->
         rate_limited_error(payload, response)
     end
   end
 
-  defp maybe_retry_status(payload, request_fun, sleep_fun, attempt, response) do
-    if attempt < @rate_limit_max_retries do
-      backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms(response))
-    else
-      rate_limited_error(payload, response)
+  # Single place that decides whether another attempt is allowed. Three bounds,
+  # all of them load-bearing:
+  #   1. attempt count (@rate_limit_max_retries),
+  #   2. a server hint longer than we are willing to hold the caller for - if
+  #      Linear says the window is 60s, retrying at 8s is a guaranteed-doomed
+  #      request, so stop and let the caller reconcile later,
+  #   3. the cumulative backoff budget (@retry_total_budget_ms).
+  defp retry_decision(%{attempt: attempt, spent_ms: spent_ms}, retry_after_ms) do
+    delay = retry_delay_ms(attempt, retry_after_ms)
+
+    cond do
+      attempt >= @rate_limit_max_retries -> :exhausted
+      is_integer(retry_after_ms) and retry_after_ms > @rate_limit_max_backoff_ms -> :exhausted
+      spent_ms + delay > @retry_total_budget_ms -> :exhausted
+      true -> {:retry, delay}
     end
   end
+
+  @doc false
+  @spec idempotent_payload?(map()) :: boolean()
+  def idempotent_payload?(%{"query" => document}) when is_binary(document) do
+    not Regex.match?(~r/\bmutation\b/i, document)
+  end
+
+  def idempotent_payload?(_payload), do: false
 
   # Distinct, adapter-owned rate-limit category (SPEC 11.4). Callers that only
   # match {:linear_api_status, _} keep working through their catch-all clauses,
@@ -379,11 +433,11 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp body_retry_after_ms(_body), do: nil
 
-  defp maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, attempt, token, response) do
+  defp maybe_retry_with_fallback_auth(payload, request_fun, sleep_fun, retry, token, response) do
     case Auth.fallback_api_key(token) do
       {:ok, fallback_token} ->
         Logger.warning("Linear auth failed; retrying request with bootstrap Linear auth")
-        retry_with_token(payload, request_fun, sleep_fun, attempt, fallback_token, token, response)
+        retry_with_token(payload, request_fun, sleep_fun, retry, fallback_token, token, response)
 
       :none ->
         Auth.clear_runtime_api_key_override()
@@ -391,17 +445,17 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp retry_with_token(payload, request_fun, sleep_fun, attempt, token, failed_token, failure_response) do
+  defp retry_with_token(payload, request_fun, sleep_fun, retry, token, failed_token, failure_response) do
     request_fun.(payload, graphql_headers_for_token(token))
-    |> handle_fallback_graphql_result(payload, request_fun, sleep_fun, attempt, token, failed_token, failure_response)
+    |> handle_fallback_graphql_result(payload, request_fun, sleep_fun, retry, token, failed_token, failure_response)
   end
 
   defp handle_fallback_graphql_result(
-         {:ok, %{status: 200, body: body}},
+         {:ok, %{status: 200, body: body} = response},
          payload,
          request_fun,
          sleep_fun,
-         attempt,
+         retry,
          token,
          failed_token,
          failure_response
@@ -411,7 +465,7 @@ defmodule SymphonyElixir.Linear.Client do
       log_auth_and_fail(payload, %{status: 200, body: body})
     else
       promote_fallback_token(token, failed_token, failure_response)
-      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, attempt)
+      maybe_retry_rate_limited_body(body, payload, request_fun, sleep_fun, retry, response)
     end
   end
 
@@ -420,14 +474,14 @@ defmodule SymphonyElixir.Linear.Client do
          payload,
          request_fun,
          sleep_fun,
-         attempt,
+         retry,
          token,
          failed_token,
          failure_response
        )
        when status in [429] do
     promote_fallback_token(token, failed_token, failure_response)
-    maybe_retry_status(payload, request_fun, sleep_fun, attempt, response)
+    maybe_retry_status(payload, request_fun, sleep_fun, retry, response)
   end
 
   defp handle_fallback_graphql_result({:ok, response}, payload, _request_fun, _sleep_fun, _attempt, _token, _failed_token, _failure_response) do
@@ -441,37 +495,45 @@ defmodule SymphonyElixir.Linear.Client do
     {:error, {:linear_api_request, reason}}
   end
 
-  defp backoff_and_retry(payload, request_fun, sleep_fun, attempt, retry_after_ms) do
-    delay = retry_delay_ms(attempt, retry_after_ms)
-
+  defp backoff_and_retry(payload, request_fun, sleep_fun, %{attempt: attempt, spent_ms: spent_ms}, delay, retry_after_ms) do
     Logger.warning(
-      "Linear request backing off #{delay}ms (attempt #{attempt + 1}/#{@rate_limit_max_retries})" <>
+      "Linear request backing off #{delay}ms (retry #{attempt + 1}/#{@rate_limit_max_retries}, " <>
+        "budget #{spent_ms + delay}/#{@retry_total_budget_ms}ms)" <>
         if(is_integer(retry_after_ms), do: " retry_after_ms=#{retry_after_ms}", else: "")
     )
 
     sleep_fun.(delay)
-    do_graphql(payload, request_fun, sleep_fun, attempt + 1)
+    do_graphql(payload, request_fun, sleep_fun, %{attempt: attempt + 1, spent_ms: spent_ms + delay})
   end
 
   @doc """
-  Pure backoff computation: exponential with jitter, honoring a server-provided
-  retry-after hint, clamped so the worst-case total added latency across the
-  bounded retry budget stays under #{@retry_total_budget_ms}ms.
+  Pure backoff computation for one retry: exponential ladder with equal jitter,
+  or a server-provided retry-after hint plus a small jitter.
+
+  Equal jitter (`base/2 + rand(base/2)`) rather than a narrow additive band: a
+  single Linear API key is shared by every daemon, so when the throttle window
+  resets they all get unblocked together. The delays have to spread far enough to
+  actually decorrelate the burst, not land inside a 400ms window.
+
+  This is a per-delay value only. The worst-case latency of a whole `graphql/3`
+  call is bounded separately by `retry_decision/2`, which stops retrying once the
+  cumulative slept time would exceed #{@retry_total_budget_ms}ms.
   """
   @spec retry_delay_ms(non_neg_integer(), pos_integer() | nil) :: pos_integer()
   def retry_delay_ms(attempt, retry_after_ms \\ nil) when is_integer(attempt) and attempt >= 0 do
-    base =
-      case retry_after_ms do
-        ms when is_integer(ms) and ms > 0 -> ms
-        _ -> @rate_limit_base_backoff_ms * Integer.pow(2, attempt)
-      end
+    case retry_after_ms do
+      ms when is_integer(ms) and ms > 0 ->
+        min(ms, @rate_limit_max_backoff_ms) + :rand.uniform(@retry_hint_jitter_ms)
 
-    jittered = base + :rand.uniform(max(round(base * @retry_jitter_fraction), 1))
+      _ ->
+        base =
+          @rate_limit_base_backoff_ms
+          |> Kernel.*(Integer.pow(2, min(attempt, 16)))
+          |> min(@rate_limit_max_backoff_ms)
 
-    jittered
-    |> min(@rate_limit_max_backoff_ms)
-    |> min(@retry_total_budget_ms)
-    |> max(1)
+        half = max(div(base, 2), 1)
+        half + :rand.uniform(half)
+    end
   end
 
   defp rate_limited_body?(%{"errors" => errors}) when is_list(errors) do
@@ -781,10 +843,16 @@ defmodule SymphonyElixir.Linear.Client do
     Application.get_env(:symphony_elixir, :linear_auth_fallback_filer, OpsIssue)
   end
 
+  # `retry: false` is explicit, matching Linear.OpsTransport: this module owns the
+  # only retry layer (see @rate_limit_max_retries). Req's default
+  # `retry: :safe_transient` happens to skip POST today, but relying on that
+  # implicitly would make a future Req default silently multiply our attempts
+  # against an API that is already throttling us.
   defp post_graphql_request(payload, headers) do
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
+      retry: false,
       connect_options: [timeout: 30_000]
     )
   end

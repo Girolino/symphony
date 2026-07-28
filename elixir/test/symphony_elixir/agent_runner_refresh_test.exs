@@ -4,7 +4,8 @@ defmodule SymphonyElixir.AgentRunnerRefreshTest do
 
   A tracker read failure at the turn boundary must never fail an agent run: the
   Codex turn is already paid for, and failing the run makes the orchestrator
-  re-dispatch the whole context.
+  re-dispatch the whole context. Degrading to the stale snapshot is bounded,
+  because a stale snapshot blinds terminal-state and role-boundary detection.
   """
 
   use SymphonyElixir.TestSupport
@@ -27,34 +28,15 @@ defmodule SymphonyElixir.AgentRunnerRefreshTest do
     :ok
   end
 
-  defp recorder do
-    {:ok, pid} = Agent.start_link(fn -> [] end)
-    {pid, fn ms -> Agent.update(pid, &[ms | &1]) end}
-  end
-
-  test "a refresh failure followed by success continues with the refreshed issue" do
-    {:ok, counter} = Agent.start_link(fn -> 0 end)
-    {delays, sleep_fun} = recorder()
-
-    fetcher = fn ["issue-1"] ->
-      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
-
-      if n < 1 do
-        {:error, {:linear_api_status, 500}}
-      else
-        {:ok, [%{@issue | title: "refreshed"}]}
-      end
-    end
+  test "a successful refresh continues with the refreshed issue" do
+    fetcher = fn ["issue-1"] -> {:ok, [%{@issue | title: "refreshed"}]} end
 
     assert {:continue, %Issue{title: "refreshed", state: "In Progress"}} =
-             AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: sleep_fun)
-
-    assert Agent.get(delays, &Enum.reverse/1) == [2_000]
+             AgentRunner.continue_with_issue_for_test(@issue, fetcher)
   end
 
-  test "a persistently failing refresh degrades to the stale snapshot, never an error" do
+  test "a failing refresh degrades to the stale snapshot without retrying the fetcher" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
-    {delays, sleep_fun} = recorder()
 
     fetcher = fn ["issue-1"] ->
       Agent.update(counter, &(&1 + 1))
@@ -63,54 +45,57 @@ defmodule SymphonyElixir.AgentRunnerRefreshTest do
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:continue, issue} =
-                 AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: sleep_fun)
+        assert {:degraded_continue, issue} =
+                 AgentRunner.continue_with_issue_for_test(@issue, fetcher)
 
         assert issue == @issue
       end)
 
     assert log =~ "continuing with the stale issue snapshot"
-    # bounded: 3 attempts total, 2 backoffs (2s then 4s)
-    assert Agent.get(counter, & &1) == 3
-    assert Agent.get(delays, &Enum.reverse/1) == [2_000, 4_000]
+
+    # No turn-boundary retry loop: the tracker adapter owns rate-limit handling and
+    # already retries with backoff. Layering a second loop here multiplies both the
+    # request count against a throttling API and the blocking time the orchestrator
+    # stall watchdog reads as a hung run.
+    assert Agent.get(counter, & &1) == 1
   end
 
-  test "a rate-limit error honors retry_after_ms from the adapter error shape" do
-    {delays, sleep_fun} = recorder()
-
+  test "a rate-limited refresh degrades exactly like any other tracker read failure" do
     fetcher = fn ["issue-1"] ->
-      {:error, {:tracker_rate_limited, %{status: 429, retry_after_ms: 5_000}}}
+      {:error, {:tracker_rate_limited, %{status: 429, retry_after_ms: 60_000}}}
     end
 
-    assert {:continue, _issue} =
-             AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: sleep_fun)
-
-    assert Agent.get(delays, &Enum.reverse/1) == [5_000, 5_000]
+    assert {:degraded_continue, _issue} = AgentRunner.continue_with_issue_for_test(@issue, fetcher)
   end
 
-  test "retry_after_ms is clamped so a hostile hint cannot stall the turn loop" do
-    assert AgentRunner.refresh_backoff_ms(1, {:tracker_rate_limited, %{retry_after_ms: 600_000}}) == 8_000
-    assert AgentRunner.refresh_backoff_ms(1, {:linear_api_status, 500}) == 2_000
-    assert AgentRunner.refresh_backoff_ms(2, {:linear_api_status, 500}) == 4_000
+  test "the degraded-continue budget is bounded: a second blind boundary ends the run" do
+    fetcher = fn ["issue-1"] -> {:error, {:linear_api_status, 500}} end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:done, issue} =
+                 AgentRunner.continue_with_issue_for_test(@issue, fetcher, degraded_turns: 1)
+
+        assert issue == @issue
+      end)
+
+    assert log =~ "ending the run so the orchestrator poll loop reconciles"
   end
 
   test "a terminal state on refresh still ends the run" do
     fetcher = fn ["issue-1"] -> {:ok, [%{@issue | state: "Done"}]} end
 
-    assert {:done, %Issue{state: "Done"}} =
-             AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: fn _ -> :ok end)
+    assert {:done, %Issue{state: "Done"}} = AgentRunner.continue_with_issue_for_test(@issue, fetcher)
   end
 
   test "an empty refresh result still ends the run with the known issue" do
     fetcher = fn ["issue-1"] -> {:ok, []} end
 
-    assert {:done, issue} =
-             AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: fn _ -> :ok end)
-
+    assert {:done, issue} = AgentRunner.continue_with_issue_for_test(@issue, fetcher)
     assert issue == @issue
   end
 
-  test "an auth failure defers immediately without burning retries" do
+  test "an auth failure defers immediately instead of degrading" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     fetcher = fn ["issue-1"] ->
@@ -119,7 +104,7 @@ defmodule SymphonyElixir.AgentRunnerRefreshTest do
     end
 
     assert {:defer, {:linear_api_status, 401}} =
-             AgentRunner.continue_with_issue_for_test(@issue, fetcher, sleep_fun: fn _ -> :ok end)
+             AgentRunner.continue_with_issue_for_test(@issue, fetcher)
 
     assert Agent.get(counter, & &1) == 1
   end

@@ -110,7 +110,107 @@ defmodule SymphonyElixir.Linear.ClientTest do
     recorded = Agent.get(delays, &Enum.reverse/1)
     assert length(recorded) == 3
     # Retry-After (3s) is honored, not the smaller default first backoff (2s)
-    assert Enum.all?(recorded, fn ms -> ms >= 3_000 and ms <= 3_600 end)
+    assert Enum.all?(recorded, fn ms -> ms >= 3_000 and ms <= 4_000 end)
+    # and the enforced cumulative budget is respected, not just the per-delay clamp
+    assert Enum.sum(recorded) <= 15_000
+  end
+
+  test "a Retry-After header on a 200 RATELIMITED body is honored, not discarded" do
+    {:ok, delays} = Agent.start_link(fn -> [] end)
+
+    # Linear's most common rate-limit shape: HTTP 200, RATELIMITED error body, and
+    # the wait hint only in the HTTP header. Rebuilding a synthetic response from
+    # the body alone would silently drop it.
+    request_fun = fn _payload, _headers ->
+      {:ok, %{status: 200, headers: %{"retry-after" => ["6"]}, body: @ratelimited}}
+    end
+
+    assert {:error, {:tracker_rate_limited, %{status: 200, retry_after_ms: 6_000}}} =
+             Client.graphql("query { x }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn ms -> Agent.update(delays, &[ms | &1]) end
+             )
+
+    recorded = Agent.get(delays, &Enum.reverse/1)
+    assert recorded != []
+    assert Enum.all?(recorded, fn ms -> ms >= 6_000 and ms <= 7_000 end)
+  end
+
+  test "a server hint longer than the max backoff stops retrying instead of retrying early" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    # Retrying at 8s into a 120s throttle window is a guaranteed-doomed request:
+    # give up immediately and let the caller reconcile later.
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:ok, %{status: 429, headers: %{"retry-after" => ["120"]}, body: %{}}}
+    end
+
+    assert {:error, {:tracker_rate_limited, %{status: 429, retry_after_ms: 120_000}}} =
+             Client.graphql("query { x }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn _ -> flunk("must not sleep for a hint beyond the backoff cap") end
+             )
+
+    assert Agent.get(counter, & &1) == 1
+  end
+
+  test "the cumulative retry budget is enforced, not decorative" do
+    {:ok, delays} = Agent.start_link(fn -> [] end)
+
+    request_fun = fn _payload, _headers ->
+      {:ok, %{status: 429, headers: %{"retry-after" => ["8"]}, body: %{}}}
+    end
+
+    assert {:error, {:tracker_rate_limited, %{status: 429}}} =
+             Client.graphql("query { x }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn ms -> Agent.update(delays, &[ms | &1]) end
+             )
+
+    recorded = Agent.get(delays, &Enum.reverse/1)
+    # 3 retries x ~8s would be ~24s; the budget stops it at 1 retry
+    assert length(recorded) == 1
+    assert Enum.sum(recorded) <= 15_000
+  end
+
+  test "a transport error on a mutation is never replayed" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    # The write may already have been applied server-side and only the response
+    # lost; replaying it duplicates the comment/state transition.
+    request_fun = fn _payload, _headers ->
+      Agent.update(counter, &(&1 + 1))
+      {:error, %Req.TransportError{reason: :closed}}
+    end
+
+    assert {:error, {:linear_api_request, %Req.TransportError{reason: :closed}}} =
+             Client.graphql("mutation { commentCreate(input: {}) { success } }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn _ -> :ok end
+             )
+
+    assert Agent.get(counter, & &1) == 1
+  end
+
+  test "a rate-limited mutation is still retried, because the request was rejected not applied" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    request_fun = fn _payload, _headers ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+
+      if n < 1,
+        do: {:ok, %{status: 400, body: @ratelimited}},
+        else: {:ok, %{status: 200, body: %{"data" => %{"ok" => true}}}}
+    end
+
+    assert {:ok, %{"data" => %{"ok" => true}}} =
+             Client.graphql("mutation { issueUpdate(id: \"x\") { success } }", %{},
+               request_fun: request_fun,
+               sleep_fun: fn _ -> :ok end
+             )
+
+    assert Agent.get(counter, & &1) == 2
   end
 
   test "429 succeeds once the throttle clears" do
@@ -175,18 +275,33 @@ defmodule SymphonyElixir.Linear.ClientTest do
     assert Agent.get(counter, & &1) == 1
   end
 
-  test "retry backoff is exponential, jittered, and bounded" do
-    first = for _ <- 1..50, do: Client.retry_delay_ms(0)
-    second = for _ <- 1..50, do: Client.retry_delay_ms(1)
+  test "retry backoff is exponential with equal jitter and bounded" do
+    first = for _ <- 1..200, do: Client.retry_delay_ms(0)
+    second = for _ <- 1..200, do: Client.retry_delay_ms(1)
 
-    assert Enum.all?(first, fn ms -> ms > 2_000 and ms <= 2_400 end)
-    assert Enum.all?(second, fn ms -> ms > 4_000 and ms <= 4_800 end)
-    # jitter is real, not a constant
-    assert Enum.uniq(first) |> length() > 1
-    # server hint wins, and everything stays clamped well under the 30s budget
+    assert Enum.all?(first, fn ms -> ms >= 1_000 and ms <= 2_000 end)
+    assert Enum.all?(second, fn ms -> ms >= 2_000 and ms <= 4_000 end)
+
+    # Equal jitter, not a narrow additive band: the whole point is decorrelating a
+    # fleet of daemons sharing one API key when the throttle window resets, so the
+    # spread has to be a real fraction of the delay.
+    assert Enum.max(first) - Enum.min(first) > 500
+
+    # server hint wins, with a little jitter so concurrent daemons still spread
     assert Client.retry_delay_ms(0, 5_000) >= 5_000
-    assert Client.retry_delay_ms(9, nil) <= 16_000
-    assert Client.retry_delay_ms(0, 600_000) <= 16_000
+    assert Client.retry_delay_ms(0, 5_000) <= 6_000
+
+    # the ladder is clamped
+    assert Client.retry_delay_ms(9, nil) <= 8_000
+    assert Client.retry_delay_ms(0, 600_000) <= 9_000
+  end
+
+  test "graphql payloads are classified for replay safety" do
+    assert Client.idempotent_payload?(%{"query" => "query { issues { id } }"})
+    assert Client.idempotent_payload?(%{"query" => "{ issues { id } }"})
+    refute Client.idempotent_payload?(%{"query" => "mutation { commentCreate { success } }"})
+    refute Client.idempotent_payload?(%{"query" => "  MUTATION Foo { x }"})
+    refute Client.idempotent_payload?(%{})
   end
 
   test "a non-rate-limit error is not retried" do
