@@ -83,6 +83,51 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
   end
 
+  test "default linear_graphql client blocks test mutations without live e2e opt-in" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "mutation UpdateIssue { issueUpdate(id: \"x\") { success } }"}
+      )
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "Linear GraphQL tool execution failed.",
+               "reason" => ":test_live_linear_mutation_disabled"
+             }
+           }
+  end
+
+  test "default linear_graphql client allows live e2e opt-in through loopback" do
+    previous_live_e2e_flag = System.get_env("SYMPHONY_RUN_LIVE_E2E")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_RUN_LIVE_E2E", previous_live_e2e_flag)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_endpoint: "http://127.0.0.1:1/graphql")
+    System.put_env("SYMPHONY_RUN_LIVE_E2E", "1")
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "mutation UpdateIssue { issueUpdate(id: \"x\") { success } }"}
+      )
+
+    assert response["success"] == false
+
+    assert %{
+             "error" => %{
+               "message" => "Linear GraphQL request failed before receiving a successful response.",
+               "reason" => reason
+             }
+           } = Jason.decode!(response["output"])
+
+    assert reason =~ "econnrefused"
+  end
+
   test "linear_graphql ignores legacy operationName arguments" do
     test_pid = self()
 

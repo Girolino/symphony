@@ -1,6 +1,13 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
 
+  defmodule InertOpsIssueFiler do
+    @spec file(String.t(), String.t(), keyword()) :: {:existing, map()}
+    def file(_title, _body, _opts) do
+      {:existing, %{"identifier" => "SYM-TEST-INERT", "url" => "https://linear.example/test-ops-issue"}}
+    end
+  end
+
   defmacro __using__(_opts) do
     quote do
       use ExUnit.Case
@@ -39,6 +46,7 @@ defmodule SymphonyElixir.TestSupport do
         previous_linear_auth_fallback_reported = Application.get_env(:symphony_elixir, :linear_auth_fallback_reported)
         previous_linear_auth_fallback_filer = Application.get_env(:symphony_elixir, :linear_auth_fallback_filer)
         previous_linear_graphql_client = Application.get_env(:symphony_elixir, :linear_graphql_client)
+        previous_ops_issue_filer = Application.get_env(:symphony_elixir, :ops_issue_filer)
 
         previous_workpad_bootstrap_lock_metadata_writer =
           Application.get_env(:symphony_elixir, :workpad_bootstrap_lock_metadata_writer)
@@ -47,6 +55,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.get_env(:symphony_elixir, :agent_run_lease_reclaim_observer)
 
         Application.put_env(:symphony_elixir, :linear_auth_bootstrap_path, Path.join(workflow_root, "missing-linear.env"))
+        Application.put_env(:symphony_elixir, :ops_issue_filer, SymphonyElixir.TestSupport.InertOpsIssueFiler)
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
@@ -83,6 +92,11 @@ defmodule SymphonyElixir.TestSupport do
           case previous_linear_graphql_client do
             nil -> Application.delete_env(:symphony_elixir, :linear_graphql_client)
             value -> Application.put_env(:symphony_elixir, :linear_graphql_client, value)
+          end
+
+          case previous_ops_issue_filer do
+            nil -> Application.delete_env(:symphony_elixir, :ops_issue_filer)
+            value -> Application.put_env(:symphony_elixir, :ops_issue_filer, value)
           end
 
           case previous_workpad_bootstrap_lock_metadata_writer do
