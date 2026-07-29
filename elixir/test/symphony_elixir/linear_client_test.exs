@@ -194,8 +194,15 @@ defmodule SymphonyElixir.Linear.ClientTest do
   end
 
   test "test runs fail closed instead of posting default live Linear mutations" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_endpoint: "http://127.0.0.1:1/graphql")
+
     assert {:error, :test_live_linear_mutation_disabled} =
              Client.graphql("mutation { issueUpdate(id: \"x\") { success } }", %{})
+  end
+
+  test "test mutation guard rejects invalid injected request transports" do
+    assert {:error, :test_live_linear_mutation_disabled} =
+             Client.graphql("mutation { issueUpdate(id: \"x\") { success } }", %{}, request_fun: :invalid)
   end
 
   test "a rate-limited mutation is still retried, because the request was rejected not applied" do

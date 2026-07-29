@@ -117,7 +117,18 @@ defmodule SymphonyElixir.OpsIssueTest do
 
   test "test runs fail closed instead of using the default live Linear transport" do
     opts = [
-      get_env: fn "LINEAR_API_KEY" -> "live-looking-test-key" end,
+      get_env: fn _name -> nil end,
+      bootstrap_path: "/nonexistent/bootstrap"
+    ]
+
+    assert {:error, :test_live_linear_ops_issue_disabled} =
+             OpsIssue.file("breaker parked: SYM-1", "body", opts)
+  end
+
+  test "test ops issue guard rejects invalid injected GraphQL transports" do
+    opts = [
+      graphql_fun: :invalid,
+      get_env: fn _name -> nil end,
       bootstrap_path: "/nonexistent/bootstrap"
     ]
 

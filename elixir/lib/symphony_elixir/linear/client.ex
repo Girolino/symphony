@@ -368,7 +368,7 @@ defmodule SymphonyElixir.Linear.Client do
   if Mix.env() == :test do
     defp prevent_test_live_linear_mutation(payload, opts) do
       cond do
-        Keyword.has_key?(opts, :request_fun) -> :ok
+        opts |> Keyword.get(:request_fun) |> is_function(2) -> :ok
         idempotent_payload?(payload) -> :ok
         true -> {:error, :test_live_linear_mutation_disabled}
       end

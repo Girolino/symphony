@@ -45,19 +45,21 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
     Process.register(self(), :completion_latch_test_process)
 
     previous_ops_issue_filer = Application.get_env(:symphony_elixir, :ops_issue_filer)
+    ledger_path = Path.join(System.tmp_dir!(), "latch-ledger-#{System.unique_integer([:positive])}.json")
 
     Application.put_env(:symphony_elixir, :ops_issue_filer, FakeOpsIssueFiler)
-
-    Application.put_env(
-      :symphony_elixir,
-      :metrics_ledger_file,
-      Path.join(System.tmp_dir!(), "latch-ledger-#{System.unique_integer([:positive])}.json")
-    )
+    Application.put_env(:symphony_elixir, :metrics_ledger_file, ledger_path)
 
     on_exit(fn ->
       case previous_ops_issue_filer do
         nil -> Application.delete_env(:symphony_elixir, :ops_issue_filer)
         value -> Application.put_env(:symphony_elixir, :ops_issue_filer, value)
+      end
+
+      case File.rm(ledger_path) do
+        :ok -> :ok
+        {:error, :enoent} -> :ok
+        {:error, reason} -> flunk("failed to remove metrics ledger #{ledger_path}: #{inspect(reason)}")
       end
     end)
 

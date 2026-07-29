@@ -126,7 +126,7 @@ defmodule SymphonyElixir.OpsIssue do
 
   if Mix.env() == :test do
     defp prevent_test_live_linear_create(opts) do
-      if Keyword.has_key?(opts, :graphql_fun),
+      if opts |> Keyword.get(:graphql_fun) |> is_function(4),
         do: :ok,
         else: {:error, :test_live_linear_ops_issue_disabled}
     end
