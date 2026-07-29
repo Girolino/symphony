@@ -118,18 +118,12 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp workpad_create_input(query, variables) do
-    cond do
-      not String.contains?(query, "commentCreate") ->
-        :ignore
-
-      not workpad_body?(map_get_input(variables, "body")) ->
-        :ignore
-
-      true ->
-        case map_get_input(variables, "issueId") do
-          issue_id when is_binary(issue_id) and issue_id != "" -> {:ok, issue_id}
-          _ -> :ignore
-        end
+    if String.contains?(query, "commentCreate") do
+      variables
+      |> find_workpad_create_issue_id()
+      |> maybe_find_inline_workpad_create_issue_id(query)
+    else
+      :ignore
     end
   end
 
@@ -407,15 +401,90 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp map_get(_map, _key), do: nil
 
-  defp map_get_input(map, key) when is_map(map) do
-    case map_get(map, key) do
-      value when is_binary(value) ->
-        value
+  defp find_workpad_create_issue_id(value) when is_map(value) do
+    case workpad_issue_id_from_input(value) do
+      {:ok, _issue_id} = result ->
+        result
 
-      _ ->
-        map
-        |> map_get("input")
-        |> map_get(key)
+      :ignore ->
+        find_nested_workpad_create_issue_id(value)
+    end
+  end
+
+  defp find_workpad_create_issue_id(_value), do: :ignore
+
+  defp find_nested_workpad_create_issue_id(value) do
+    value
+    |> Map.values()
+    |> Enum.find_value(&workpad_create_issue_id_or_nil/1) || :ignore
+  end
+
+  defp workpad_create_issue_id_or_nil(value) do
+    case find_workpad_create_issue_id(value) do
+      {:ok, _issue_id} = result -> result
+      :ignore -> nil
+    end
+  end
+
+  defp maybe_find_inline_workpad_create_issue_id({:ok, _issue_id} = result, _query), do: result
+  defp maybe_find_inline_workpad_create_issue_id(:ignore, query), do: find_inline_workpad_create_issue_id(query)
+
+  defp find_inline_workpad_create_issue_id(query) do
+    with {:ok, after_create} <- after_first_match(query, "commentCreate"),
+         true <- inline_input_argument?(after_create),
+         {:ok, body} <- inline_graphql_string_field(after_create, "body"),
+         true <- workpad_body?(body),
+         {:ok, issue_id} <- inline_graphql_string_field(after_create, "issueId"),
+         true <- issue_id != "" do
+      {:ok, issue_id}
+    else
+      _ -> :ignore
+    end
+  end
+
+  defp after_first_match(value, match) do
+    case :binary.match(value, match) do
+      {index, match_size} ->
+        start = index + match_size
+        {:ok, binary_part(value, start, byte_size(value) - start)}
+
+      :nomatch ->
+        :error
+    end
+  end
+
+  defp inline_input_argument?(value) do
+    Regex.match?(~r/^\s*\(\s*input\s*:/s, value)
+  end
+
+  defp inline_graphql_string_field(query, field) do
+    escaped_field = Regex.escape(field)
+
+    regex =
+      Regex.compile!(
+        ~S/(?:^|[^a-zA-Z0-9_])/ <> escaped_field <> ~S/\s*:\s*"((?:\\.|[^"\\])*)"/,
+        "s"
+      )
+
+    case Regex.run(regex, query, capture: :all_but_first) do
+      [value] -> Jason.decode(~s("#{value}"))
+      _ -> :error
+    end
+  end
+
+  defp workpad_issue_id_from_input(value) when is_map(value) do
+    body = map_get(value, "body")
+    issue_id = map_get(value, "issueId")
+
+    cond do
+      not workpad_body?(body) ->
+        :ignore
+
+      is_binary(issue_id) and issue_id != "" ->
+        {:ok, issue_id}
+
+      true ->
+        :ignore
     end
   end
 

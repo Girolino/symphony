@@ -168,6 +168,154 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
+  test "linear_graphql inline workpad creates converge after newly filed lookup races" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_race, [:public])
+
+    client = inline_workpad_linear_client(table)
+    lookup_args = workpad_lookup_args()
+
+    assert lookup_args
+           |> execute_with_client(client)
+           |> output()
+           |> get_in(["data", "issue", "comments", "nodes"]) == []
+
+    assert lookup_args
+           |> execute_with_client(client)
+           |> output()
+           |> get_in(["data", "issue", "comments", "nodes"]) == []
+
+    tasks =
+      for index <- 1..2 do
+        Task.async(fn ->
+          create =
+            "## Codex Workpad\n\ninline created by #{index}"
+            |> inline_workpad_create_args()
+            |> execute_with_client(client)
+            |> output()
+
+          id = get_in(create, ["data", "commentCreate", "comment", "id"])
+
+          update =
+            workpad_update_args(id, "## Codex Workpad\n\ninline updated by #{index}")
+            |> execute_with_client(client)
+            |> output()
+
+          {create, update}
+        end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert Enum.map(results, fn {create, _update} -> get_in(create, ["data", "commentCreate", "comment", "id"]) end) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert count_workpad_calls(table, :comment_update) == 2
+    assert count_workpad_calls(table, :comment_lookup) >= 4
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates guard aliased input object variables" do
+    table = :ets.new(:workpad_bootstrap_guard_aliased_input, [:public])
+
+    client = workpad_linear_client(table)
+
+    tasks =
+      for index <- 1..2 do
+        Task.async(fn ->
+          "comment#{index}"
+          |> workpad_create_args_with_variable("## Codex Workpad\n\ncreated by #{index}")
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates guard inline input object literals" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_input, [:public])
+
+    query = ~S"""
+    mutation CreateWorkpad {
+      commentCreate(input: {issueId: "issue-workpad-race", body: "## Codex Workpad\n\ninline with ) and }"}) {
+        success
+        comment {
+          id
+          body
+          resolvedAt
+          createdAt
+          updatedAt
+        }
+      }
+    }
+    """
+
+    client = fn query, variables, opts ->
+      cond do
+        String.contains?(query, "commentCreate") ->
+          handle_workpad_create(table, %{
+            "body" => "## Codex Workpad\n\ninline",
+            "issueId" => "issue-workpad-race"
+          })
+
+        String.contains?(query, "commentResolve") ->
+          handle_workpad_resolve(table, variables)
+
+        String.contains?(query, "comments") ->
+          workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+
+    results =
+      1..2
+      |> Enum.map(fn _index ->
+        Task.async(fn ->
+          %{"query" => query}
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql inline workpad creates without issue id pass through unguarded" do
+    test_pid = self()
+
+    query = ~S"""
+    mutation CreateWorkpad {
+      commentCreate(input: {body: "## Codex Workpad\n\nmissing issue"}) {
+        success
+      }
+    }
+    """
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => query},
+        linear_client: fn forwarded_query, variables, opts ->
+          send(test_pid, {:unguarded_inline_create, forwarded_query, variables, opts})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:unguarded_inline_create, _query, %{}, []}
+  end
+
   test "linear_graphql workpad creates ignore resolved historical workpads" do
     table = :ets.new(:workpad_bootstrap_guard_resolved, [:public])
 
@@ -888,6 +1036,46 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
+  defp workpad_create_args_with_variable(variable_name, body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($#{variable_name}: CommentCreateInput!) {
+        commentCreate(input: $#{variable_name}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{variable_name => %{"issueId" => issue_id, "body" => body}}
+    }
+  end
+
+  defp inline_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: #{Jason.encode!(issue_id)}, body: #{Jason.encode!(body)}}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
   defp workpad_update_args(id, body) do
     %{
       "query" => """
@@ -923,6 +1111,23 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
         true ->
           {:ok, %{"data" => %{}}}
+      end
+    end
+  end
+
+  defp inline_workpad_linear_client(table) do
+    inline_variables = %{
+      "input" => %{
+        "body" => "## Codex Workpad\n\ninline",
+        "issueId" => "issue-workpad-race"
+      }
+    }
+
+    fn query, variables, opts ->
+      if String.contains?(query, "commentCreate") and variables == %{} do
+        handle_workpad_create(table, inline_variables)
+      else
+        workpad_linear_client(table).(query, variables, opts)
       end
     end
   end
@@ -1063,11 +1268,21 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         value
 
       _ ->
-        map
-        |> Map.get("input", %{})
-        |> Map.get(key)
+        find_nested_binary_value(map, key)
     end
   end
+
+  defp find_nested_binary_value(map, key) when is_map(map) do
+    Enum.find_value(map, fn
+      {_nested_key, nested_map} when is_map(nested_map) ->
+        Map.get(nested_map, key) || find_nested_binary_value(nested_map, key)
+
+      _entry ->
+        nil
+    end)
+  end
+
+  defp find_nested_binary_value(_map, _key), do: nil
 
   defp timestamp(sequence) do
     "2026-07-24T12:00:#{String.pad_leading(to_string(sequence), 2, "0")}Z"
