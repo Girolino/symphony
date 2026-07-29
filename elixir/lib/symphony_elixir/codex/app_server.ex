@@ -1044,8 +1044,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec delta_emission_due_for_test?(String.t()) :: boolean()
   def delta_emission_due_for_test?(method), do: delta_emission_due?(method)
 
+  @doc false
+  @spec emit_notification_for_test((map() -> term()), String.t(), map()) :: :ok
+  def emit_notification_for_test(on_message, method, payload) do
+    maybe_emit_notification(on_message, method, payload, Jason.encode!(payload), %{})
+  end
+
   defp delta_notification?(method) when is_binary(method) do
-    String.ends_with?(method, "Delta") or String.ends_with?(method, "/delta")
+    String.ends_with?(method, "Delta") or
+      String.ends_with?(method, "/delta") or
+      (String.starts_with?(method, "codex/event/") and String.ends_with?(method, "_delta"))
   end
 
   defp delta_notification?(_method), do: false
