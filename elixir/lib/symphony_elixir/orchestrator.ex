@@ -413,8 +413,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp unconfirmed_endings(_entry), do: 0
-
   defp running_entry_issue_state(%{issue: %Issue{state: state}}), do: state
   defp running_entry_issue_state(_running_entry), do: nil
 
