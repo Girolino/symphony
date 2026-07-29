@@ -507,15 +507,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
           {:error, {:turn_input_required, payload}}
         else
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
+          # Delta-class notifications (outputDelta, agentMessage/delta, ...) arrive
+          # in bursts of dozens per second per agent and are consumed downstream
+          # only for dashboard summaries and liveness timestamps. Forwarding every
+          # one floods the orchestrator mailbox (observed 32k+ queued messages and
+          # an OOM death at 12-16 concurrent agents); throttle each method to one
+          # emission per second. Non-delta notifications pass through unchanged.
+          maybe_emit_notification(on_message, method, payload, payload_string, metadata)
 
           Logger.debug("Codex notification: #{inspect(method)}")
           receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
@@ -1020,6 +1018,49 @@ defmodule SymphonyElixir.Codex.AppServer do
           ArgumentError ->
             :ok
         end
+    end
+  end
+
+  defp maybe_emit_notification(on_message, method, payload, payload_string, metadata) do
+    if not delta_notification?(method) or delta_emission_due?(method) do
+      emit_message(
+        on_message,
+        :notification,
+        %{payload: payload, raw: payload_string},
+        metadata
+      )
+    end
+
+    :ok
+  end
+
+  @delta_emit_interval_ms 1_000
+
+  @doc false
+  def delta_notification_for_test?(method), do: delta_notification?(method)
+
+  @doc false
+  def delta_emission_due_for_test?(method), do: delta_emission_due?(method)
+
+  defp delta_notification?(method) when is_binary(method) do
+    String.ends_with?(method, "Delta") or String.ends_with?(method, "/delta")
+  end
+
+  defp delta_notification?(_method), do: false
+
+  # Runs in the single stream-reading process for a turn, so the process
+  # dictionary is a race-free throttle store scoped to exactly that stream.
+  defp delta_emission_due?(method) do
+    now = System.monotonic_time(:millisecond)
+    key = {:codex_delta_last_emit, method}
+
+    case Process.get(key) do
+      last when is_integer(last) and now - last < @delta_emit_interval_ms ->
+        false
+
+      _ ->
+        Process.put(key, now)
+        true
     end
   end
 
