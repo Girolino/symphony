@@ -26,7 +26,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
-    case Presenter.refresh_payload(orchestrator()) do
+    case Presenter.refresh_payload(orchestrator(), snapshot_timeout_ms()) do
       {:ok, payload} ->
         conn
         |> put_status(202)
@@ -34,6 +34,24 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
       {:error, :unavailable} ->
         error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+
+      {:error, %{reason: :timeout, message_queue_len: message_queue_len}} ->
+        error_response(
+          conn,
+          503,
+          "orchestrator_refresh_timeout",
+          "Orchestrator refresh timed out",
+          %{message_queue_len: message_queue_len}
+        )
+
+      {:error, %{message_queue_len: message_queue_len}} ->
+        error_response(
+          conn,
+          503,
+          "orchestrator_unavailable",
+          "Orchestrator is unavailable",
+          %{message_queue_len: message_queue_len}
+        )
     end
   end
 
@@ -48,9 +66,13 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   end
 
   defp error_response(conn, status, code, message) do
+    error_response(conn, status, code, message, %{})
+  end
+
+  defp error_response(conn, status, code, message, details) do
     conn
     |> put_status(status)
-    |> json(%{error: %{code: code, message: message}})
+    |> json(%{error: Map.merge(%{code: code, message: message}, details)})
   end
 
   defp orchestrator do

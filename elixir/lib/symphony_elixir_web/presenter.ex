@@ -58,11 +58,21 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
+  @spec refresh_payload(GenServer.name()) ::
+          {:ok, map()} | {:error, :unavailable | Orchestrator.refresh_unavailable_details()}
   def refresh_payload(orchestrator) do
-    case Orchestrator.request_refresh(orchestrator) do
+    refresh_payload(orchestrator, 5_000)
+  end
+
+  @spec refresh_payload(GenServer.name(), timeout()) ::
+          {:ok, map()} | {:error, :unavailable | Orchestrator.refresh_unavailable_details()}
+  def refresh_payload(orchestrator, timeout) do
+    case Orchestrator.request_refresh(orchestrator, timeout) do
       :unavailable ->
         {:error, :unavailable}
+
+      {:unavailable, details} ->
+        {:error, details}
 
       payload ->
         {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
