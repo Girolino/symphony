@@ -141,6 +141,17 @@ defmodule SymphonyElixir.Config.Schema do
       # Role isolation: crossing into/out of these states ends the session so
       # the next dispatch is a fresh session in the new role (empty = off).
       field(:role_boundary_states, {:array, :string}, default: [])
+      # Post-completion spin control. A turn that completes faster than
+      # instant_turn_threshold_ms did no work (the model replies "already Done"
+      # in ~1s); it is a symptom of a run the tracker cannot confirm as
+      # finished, not of progress. Back off between such turns, bound how many
+      # in a row a run may burn, and latch the issue out of immediate
+      # re-dispatch when a run ends without a confirmed terminal read.
+      # instant_turn_threshold_ms: 0 disables instant-turn detection entirely.
+      field(:instant_turn_threshold_ms, :integer, default: 5_000)
+      field(:instant_turn_backoff_ms, :integer, default: 30_000)
+      field(:max_consecutive_instant_turns, :integer, default: 3)
+      field(:unconfirmed_completion_backoff_ms, :integer, default: 300_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -155,7 +166,11 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents_by_state,
           :max_consecutive_failures,
           :blocked_max_age_ms,
-          :role_boundary_states
+          :role_boundary_states,
+          :instant_turn_threshold_ms,
+          :instant_turn_backoff_ms,
+          :max_consecutive_instant_turns,
+          :unconfirmed_completion_backoff_ms
         ],
         empty_values: []
       )
@@ -164,6 +179,10 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> validate_number(:max_consecutive_failures, greater_than: 0)
       |> validate_number(:blocked_max_age_ms, greater_than: 0)
+      |> validate_number(:instant_turn_threshold_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:instant_turn_backoff_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_consecutive_instant_turns, greater_than: 0)
+      |> validate_number(:unconfirmed_completion_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end

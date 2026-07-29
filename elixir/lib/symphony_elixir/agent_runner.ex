@@ -115,6 +115,34 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  # The orchestrator cannot tell a run that ended because the issue is provably
+  # finished from one that ended because the tracker would not say. Both look
+  # like a normal task exit, and the second one - re-dispatched a second later -
+  # is the post-completion spin: 181 sessions in 15 minutes with 0 recorded
+  # completions and 74 RATELIMITED errors. So the runner reports which of the
+  # two it was; absence of the report means "confirmed" (skip paths, hook skips)
+  # and keeps the message optional.
+  defp end_run(ctx, issue, confirmed?, reason, issue_state \\ nil) do
+    send_run_outcome(ctx.codex_update_recipient, issue, %{
+      confirmed?: confirmed?,
+      reason: reason,
+      issue_state: issue_state || issue_state_of(issue)
+    })
+
+    :ok
+  end
+
+  defp send_run_outcome(recipient, %Issue{id: issue_id}, outcome)
+       when is_binary(issue_id) and is_pid(recipient) do
+    send(recipient, {:agent_run_outcome, issue_id, outcome})
+    :ok
+  end
+
+  defp send_run_outcome(_recipient, _issue, _outcome), do: :ok
+
+  defp issue_state_of(%Issue{state: state}), do: state
+  defp issue_state_of(_issue), do: nil
+
   # SPEC 11.4: a running-state refresh failure must never kill an in-flight agent
   # run. A completed Codex turn is already-paid-for model spend; discarding it
   # because Linear rate-limited a read costs a full-context re-send on retry.
@@ -135,51 +163,140 @@ defmodule SymphonyElixir.AgentRunner do
   @max_degraded_turns 1
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    agent_config = Config.settings!().agent
+    max_turns = Keyword.get(opts, :max_turns, agent_config.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      ctx = %{
-        app_session: session,
-        workspace: workspace,
-        codex_update_recipient: codex_update_recipient,
-        opts: opts,
-        issue_state_fetcher: issue_state_fetcher
-      }
+      ctx =
+        build_turn_ctx(
+          session,
+          workspace,
+          codex_update_recipient,
+          Keyword.put(opts, :issue_state_fetcher, issue_state_fetcher),
+          agent_config
+        )
 
       try do
-        do_run_codex_turns(ctx, issue, %{number: 1, max: max_turns, degraded: 0})
+        do_run_codex_turns(ctx, issue, initial_turn(max_turns))
       after
         AppServer.stop_session(session)
       end
     end
   end
 
+  defp initial_turn(max_turns), do: %{number: 1, max: max_turns, degraded: 0, instant: 0}
+
+  defp build_turn_ctx(session, workspace, codex_update_recipient, opts, agent_config) do
+    %{
+      app_session: session,
+      workspace: workspace,
+      codex_update_recipient: codex_update_recipient,
+      opts: opts,
+      issue_state_fetcher: Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1),
+      run_turn_fun: Keyword.get(opts, :run_turn_fun, &AppServer.run_turn/4),
+      sleep_fun: Keyword.get(opts, :sleep_fun, &Process.sleep/1),
+      clock_fun: Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end),
+      instant_turn_threshold_ms: agent_config.instant_turn_threshold_ms,
+      instant_turn_backoff_ms: agent_config.instant_turn_backoff_ms,
+      max_consecutive_instant_turns: agent_config.max_consecutive_instant_turns
+    }
+  end
+
+  @doc false
+  @spec run_codex_turns_for_test(Issue.t(), keyword()) :: :ok | {:error, term()}
+  def run_codex_turns_for_test(issue, opts) do
+    agent_config = Config.settings!().agent
+    max_turns = Keyword.get(opts, :max_turns, agent_config.max_turns)
+
+    ctx =
+      build_turn_ctx(
+        Keyword.get(opts, :app_session, %{session_id: "test-session", thread_id: "test-thread"}),
+        Keyword.get(opts, :workspace, "/tmp/test-workspace"),
+        Keyword.get(opts, :codex_update_recipient),
+        opts,
+        agent_config
+      )
+
+    do_run_codex_turns(ctx, issue, initial_turn(max_turns))
+  end
+
   defp do_run_codex_turns(ctx, issue, %{number: turn_number, max: max_turns} = turn) do
     prompt = build_turn_prompt(issue, ctx.opts, turn_number, max_turns)
+    turn_started_at_ms = ctx.clock_fun.()
 
-    case AppServer.run_turn(
+    case ctx.run_turn_fun.(
            ctx.app_session,
            prompt,
            issue,
            on_message: codex_message_handler(ctx.codex_update_recipient, issue)
          ) do
       {:ok, turn_session} ->
-        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{ctx.workspace} turn=#{turn_number}/#{max_turns}")
+        elapsed_ms = ctx.clock_fun.() - turn_started_at_ms
 
-        handle_turn_boundary(ctx, issue, turn_session, turn)
+        Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{ctx.workspace} turn=#{turn_number}/#{max_turns} elapsed_ms=#{elapsed_ms}")
+
+        handle_completed_turn(ctx, issue, turn_session, turn, elapsed_ms)
 
       {:error, :response_timeout} when turn_number > 1 ->
         Logger.warning(
           "follow-up Codex turn start failed for #{issue_context(issue)} thread_id=#{ctx.app_session[:thread_id]} turn=#{turn_number}/#{max_turns}: :response_timeout; returning control to orchestrator continuation retry"
         )
 
-        :ok
+        end_run(ctx, issue, false, :response_timeout)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  # SPEC 11.4 post-completion spin control, mechanism A. Measured in production: when Linear throttles the
+  # tracker reads, the turn cycle collapses to ~1.1s (22:26:36.443 start ->
+  # 22:26:37.585 complete). The model is not working - the ticket genuinely
+  # finished earlier and it says so immediately - but each such turn re-sends
+  # the full context and its boundary refresh hammers the API that is already
+  # rate-limiting us. So a turn that completed under the threshold buys a
+  # backoff before the boundary refresh (giving the tracker room to recover, so
+  # the refresh has a chance to actually see the terminal state), and a bounded
+  # number of them in a row ends the run instead of grinding through max_turns.
+  defp handle_completed_turn(ctx, issue, turn_session, %{instant: instant_turns} = turn, elapsed_ms) do
+    if instant_turn?(ctx, elapsed_ms) do
+      handle_instant_turn(ctx, issue, turn_session, turn, elapsed_ms, instant_turns + 1)
+    else
+      handle_turn_boundary(ctx, issue, turn_session, %{turn | instant: 0})
+    end
+  end
+
+  defp handle_instant_turn(ctx, issue, turn_session, %{number: turn_number, max: max_turns} = turn, elapsed_ms, instant_turns) do
+    max_instant = ctx.max_consecutive_instant_turns
+
+    if instant_turns >= max_instant do
+      Logger.warning(
+        "ending agent run for #{issue_context(issue)} after #{instant_turns} consecutive instant turn(s) " <>
+          "(last elapsed_ms=#{elapsed_ms} < agent.instant_turn_threshold_ms=#{ctx.instant_turn_threshold_ms}) " <>
+          "turn=#{turn_number}/#{max_turns}; the model has nothing left to do and the terminal state is unconfirmed"
+      )
+
+      end_run(ctx, issue, false, :instant_turn_bound)
+    else
+      Logger.warning(
+        "instant turn for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} < " <>
+          "agent.instant_turn_threshold_ms=#{ctx.instant_turn_threshold_ms} " <>
+          "instant=#{instant_turns}/#{max_instant}; backing off #{ctx.instant_turn_backoff_ms}ms before the turn boundary"
+      )
+
+      ctx.sleep_fun.(ctx.instant_turn_backoff_ms)
+
+      handle_turn_boundary(ctx, issue, turn_session, %{turn | instant: instant_turns})
+    end
+  end
+
+  defp instant_turn?(ctx, elapsed_ms) when is_integer(elapsed_ms) do
+    threshold = ctx.instant_turn_threshold_ms
+    is_integer(threshold) and threshold > 0 and elapsed_ms < threshold
+  end
+
+  defp instant_turn?(_ctx, _elapsed_ms), do: false
 
   defp handle_turn_boundary(ctx, issue, turn_session, %{number: turn_number, max: max_turns, degraded: degraded_turns} = turn) do
     case continue_with_issue?(issue, ctx.issue_state_fetcher, degraded_turns) do
@@ -189,7 +306,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:continue, refreshed_issue} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-        :ok
+        end_run(ctx, refreshed_issue, true, :max_turns_active)
 
       {:degraded_continue, stale_issue} when turn_number < max_turns ->
         continue_on_stale_snapshot(ctx, stale_issue, turn)
@@ -197,10 +314,13 @@ defmodule SymphonyElixir.AgentRunner do
       {:degraded_continue, stale_issue} ->
         Logger.info("Reached agent.max_turns for #{issue_context(stale_issue)} on a stale snapshot; returning control to orchestrator")
 
-        :ok
+        end_run(ctx, stale_issue, false, :max_turns_stale)
 
-      {:done, _refreshed_issue} ->
-        :ok
+      {:done, refreshed_issue} ->
+        end_run(ctx, refreshed_issue, true, :terminal)
+
+      {:unconfirmed, stale_issue} ->
+        end_run(ctx, stale_issue, false, :refresh_exhausted)
 
       {:defer, reason} ->
         Logger.warning(
@@ -208,7 +328,7 @@ defmodule SymphonyElixir.AgentRunner do
             "#{inspect(reason)}; returning control to orchestrator continuation retry"
         )
 
-        :ok
+        end_run(ctx, issue, false, :refresh_deferred)
     end
   end
 
@@ -230,7 +350,7 @@ defmodule SymphonyElixir.AgentRunner do
     if role_boundary_crossed?(issue.state, refreshed_issue.state) do
       Logger.info("Ending session at role boundary for #{issue_context(refreshed_issue)}: #{inspect(issue.state)} -> #{inspect(refreshed_issue.state)}; a fresh session will own the new role")
 
-      :ok
+      end_run(ctx, refreshed_issue, true, :role_boundary)
     else
       Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -305,7 +425,11 @@ defmodule SymphonyElixir.AgentRunner do
                 "reconciles instead of burning more turns blind"
             )
 
-            {:done, issue}
+            # NOT {:done, _}: nothing confirmed this issue reached a terminal
+            # state, only that we stopped being able to look. The orchestrator
+            # must latch it out of immediate re-dispatch (SPEC 11.4 post-completion spin control, mechanism B)
+            # rather than treat it as a finished run.
+            {:unconfirmed, issue}
         end
     end
   end
@@ -314,7 +438,11 @@ defmodule SymphonyElixir.AgentRunner do
 
   @doc false
   @spec continue_with_issue_for_test(Issue.t(), (list() -> term()), keyword()) ::
-          {:continue, Issue.t()} | {:degraded_continue, Issue.t()} | {:done, Issue.t()} | {:defer, term()}
+          {:continue, Issue.t()}
+          | {:degraded_continue, Issue.t()}
+          | {:done, Issue.t()}
+          | {:unconfirmed, Issue.t()}
+          | {:defer, term()}
   def continue_with_issue_for_test(issue, issue_state_fetcher, opts \\ []) do
     continue_with_issue?(issue, issue_state_fetcher, Keyword.get(opts, :degraded_turns, 0))
   end

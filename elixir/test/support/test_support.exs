@@ -164,6 +164,16 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          # Off by default in tests: the stubbed Codex app-servers these
+          # suites drive complete a turn in milliseconds, which is exactly
+          # what SPEC 11.4 post-completion spin control treats as an instant turn. Leaving it
+          # on would make every stubbed multi-turn run sleep the 30s backoff.
+          # Tests that exercise the mechanism set the threshold explicitly.
+          instant_turn_threshold_ms: 0,
+          instant_turn_backoff_ms: nil,
+          max_consecutive_instant_turns: nil,
+          unconfirmed_completion_backoff_ms: nil,
+          max_consecutive_failures: nil,
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
@@ -201,6 +211,11 @@ defmodule SymphonyElixir.TestSupport do
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    instant_turn_threshold_ms = Keyword.get(config, :instant_turn_threshold_ms)
+    instant_turn_backoff_ms = Keyword.get(config, :instant_turn_backoff_ms)
+    max_consecutive_instant_turns = Keyword.get(config, :max_consecutive_instant_turns)
+    unconfirmed_completion_backoff_ms = Keyword.get(config, :unconfirmed_completion_backoff_ms)
+    max_consecutive_failures = Keyword.get(config, :max_consecutive_failures)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -241,6 +256,11 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        optional_agent_key("instant_turn_threshold_ms", instant_turn_threshold_ms),
+        optional_agent_key("instant_turn_backoff_ms", instant_turn_backoff_ms),
+        optional_agent_key("max_consecutive_instant_turns", max_consecutive_instant_turns),
+        optional_agent_key("unconfirmed_completion_backoff_ms", unconfirmed_completion_backoff_ms),
+        optional_agent_key("max_consecutive_failures", max_consecutive_failures),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -259,6 +279,9 @@ defmodule SymphonyElixir.TestSupport do
 
     Enum.join(sections, "\n") <> "\n"
   end
+
+  defp optional_agent_key(_key, nil), do: nil
+  defp optional_agent_key(key, value), do: "  #{key}: #{yaml_value(value)}"
 
   defp yaml_value(value) when is_binary(value) do
     "\"" <> String.replace(value, "\"", "\\\"") <> "\""

@@ -68,12 +68,16 @@ defmodule SymphonyElixir.AgentRunnerRefreshTest do
     assert {:degraded_continue, _issue} = AgentRunner.continue_with_issue_for_test(@issue, fetcher)
   end
 
-  test "the degraded-continue budget is bounded: a second blind boundary ends the run" do
+  # SPEC 11.4 post-completion spin control: the exhausted budget ends the run as :unconfirmed, not :done.
+  # Nothing proved the issue reached a terminal state - only that we stopped
+  # being able to look - and the orchestrator must latch re-dispatch on that
+  # distinction instead of treating it as a finished run.
+  test "the degraded-continue budget is bounded: a second blind boundary ends the run unconfirmed" do
     fetcher = fn ["issue-1"] -> {:error, {:linear_api_status, 500}} end
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:done, issue} =
+        assert {:unconfirmed, issue} =
                  AgentRunner.continue_with_issue_for_test(@issue, fetcher, degraded_turns: 1)
 
         assert issue == @issue
