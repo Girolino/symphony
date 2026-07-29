@@ -205,6 +205,28 @@ defmodule SymphonyElixir.Linear.ClientTest do
              Client.graphql("mutation { issueUpdate(id: \"x\") { success } }", %{}, request_fun: :invalid)
   end
 
+  test "live e2e mutation opt-in requires the environment flag and explicit option" do
+    previous_live_e2e_flag = System.get_env("SYMPHONY_RUN_LIVE_E2E")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_RUN_LIVE_E2E", previous_live_e2e_flag)
+    end)
+
+    mutation = "mutation { issueUpdate(id: \"x\") { success } }"
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_endpoint: "http://127.0.0.1:1/graphql")
+    System.delete_env("SYMPHONY_RUN_LIVE_E2E")
+
+    assert {:error, :test_live_linear_mutation_disabled} =
+             Client.graphql(mutation, %{}, allow_test_live_linear_mutation: true)
+
+    System.put_env("SYMPHONY_RUN_LIVE_E2E", "1")
+
+    assert {:error, :test_live_linear_mutation_disabled} = Client.graphql(mutation, %{})
+
+    assert {:error, {:linear_api_request, %{reason: :econnrefused}}} =
+             Client.graphql(mutation, %{}, allow_test_live_linear_mutation: true)
+  end
+
   test "a rate-limited mutation is still retried, because the request was rejected not applied" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

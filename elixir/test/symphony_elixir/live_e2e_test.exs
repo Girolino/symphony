@@ -13,6 +13,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   @docker_support_dir Path.expand("../support/live_e2e_docker", __DIR__)
   @docker_compose_file Path.join(@docker_support_dir, "docker-compose.yml")
   @result_file "LIVE_E2E_RESULT.txt"
+  @live_linear_graphql_opts [allow_test_live_linear_mutation: true]
   @live_e2e_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1",
                           do: "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
                         )
@@ -248,7 +249,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp issue_has_comment?(_issue, _expected_body), do: false
 
   defp update_entity(mutation, variables, mutation_name, entity_name) do
-    case Client.graphql(mutation, variables) do
+    case Client.graphql(mutation, variables, @live_linear_graphql_opts) do
       {:ok, %{"data" => %{^mutation_name => %{"success" => true}}}} ->
         :ok
 
@@ -267,7 +268,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   end
 
   defp graphql_data!(query, variables) when is_binary(query) and is_map(variables) do
-    case Client.graphql(query, variables) do
+    case Client.graphql(query, variables, @live_linear_graphql_opts) do
       {:ok, %{"data" => data, "errors" => errors}} when is_map(data) and is_list(errors) ->
         flunk("Linear GraphQL returned partial errors: #{inspect(errors)}")
 

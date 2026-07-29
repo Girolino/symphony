@@ -370,8 +370,14 @@ defmodule SymphonyElixir.Linear.Client do
       cond do
         opts |> Keyword.get(:request_fun) |> is_function(2) -> :ok
         idempotent_payload?(payload) -> :ok
+        live_e2e_linear_mutation_allowed?(opts) -> :ok
         true -> {:error, :test_live_linear_mutation_disabled}
       end
+    end
+
+    defp live_e2e_linear_mutation_allowed?(opts) do
+      Keyword.get(opts, :allow_test_live_linear_mutation) == true and
+        System.get_env("SYMPHONY_RUN_LIVE_E2E") == "1"
     end
   else
     defp prevent_test_live_linear_mutation(_payload, _opts), do: :ok
