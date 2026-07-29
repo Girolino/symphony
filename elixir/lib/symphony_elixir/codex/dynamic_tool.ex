@@ -70,8 +70,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp linear_client(opts) do
     case Keyword.get(opts, :linear_client) || Application.get_env(:symphony_elixir, :linear_graphql_client) do
       client when is_function(client, 3) -> client
-      _ -> &Client.graphql/3
+      _ -> &default_linear_client/3
     end
+  end
+
+  defp default_linear_client(query, variables, opts) do
+    Client.graphql(query, variables, Keyword.put_new(opts, :allow_test_live_linear_mutation, true))
   end
 
   defp normalize_linear_graphql_arguments(arguments) when is_binary(arguments) do
