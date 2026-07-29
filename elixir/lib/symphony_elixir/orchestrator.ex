@@ -1932,17 +1932,49 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  @spec request_refresh() :: map() | :unavailable
+  @default_refresh_timeout_ms 5_000
+
+  @type refresh_unavailable_details :: %{
+          reason: :timeout | :unavailable,
+          message_queue_len: non_neg_integer() | nil
+        }
+
+  @spec request_refresh() :: map() | :unavailable | {:unavailable, refresh_unavailable_details()}
   def request_refresh do
     request_refresh(__MODULE__)
   end
 
-  @spec request_refresh(GenServer.server()) :: map() | :unavailable
+  @spec request_refresh(GenServer.server()) ::
+          map() | :unavailable | {:unavailable, refresh_unavailable_details()}
   def request_refresh(server) do
-    if Process.whereis(server) do
-      GenServer.call(server, :request_refresh)
-    else
-      :unavailable
+    request_refresh(server, @default_refresh_timeout_ms)
+  end
+
+  @spec request_refresh(GenServer.server(), timeout()) ::
+          map() | :unavailable | {:unavailable, refresh_unavailable_details()}
+  def request_refresh(server, timeout) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, :request_refresh, timeout)
+        catch
+          :exit, {:timeout, _reason} ->
+            {:unavailable,
+             %{
+               reason: :timeout,
+               message_queue_len: process_message_queue_len(pid)
+             }}
+
+          :exit, _reason ->
+            {:unavailable,
+             %{
+               reason: :unavailable,
+               message_queue_len: process_message_queue_len(pid)
+             }}
+        end
+
+      _ ->
+        :unavailable
     end
   end
 
@@ -1983,6 +2015,13 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  defp process_message_queue_len(pid) when is_pid(pid) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, count} when is_integer(count) and count >= 0 -> count
+      _ -> nil
+    end
   end
 
   defp snapshot_from_state(state) do

@@ -1071,6 +1071,10 @@ Important emitted events include, for example:
 - `other_message`
 - `malformed`
 
+High-volume delta-class notifications MAY be coalesced or throttled before the orchestrator
+mailbox when downstream consumers use them only for progress and dashboard summaries. Lifecycle,
+token-usage, rate-limit, approval, and other control-relevant notifications MUST remain lossless.
+
 ### 10.5 Approval, Tool Calls, and User Input Policy
 
 Approval, sandbox, and user-input behavior is implementation-defined.
@@ -1628,6 +1632,10 @@ Minimum endpoints:
       "operations": ["poll", "reconcile"]
     }
     ```
+
+  - If the orchestrator does not accept the refresh request before the API timeout, return
+    `503 Service Unavailable` with an error envelope that includes the observed
+    `message_queue_len` when available.
 
 API design notes:
 

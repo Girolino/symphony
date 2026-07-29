@@ -176,6 +176,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - JSON API for operational debugging under `/api/v1/*`
 - ETS-backed last-known-good snapshots so dashboard and API reads do not contend with tracker and worker messages in the orchestrator mailbox
 - State responses include poll countdown and last poll error under `polling`, plus snapshot age, orchestrator liveness, mailbox depth, and poll-busy health under `health`
+- Delta-class Codex notifications are throttled per method and app-server stream before they reach the orchestrator mailbox; lifecycle, token-usage, rate-limit, approval, and other non-delta events remain lossless
+- Refresh requests that cannot reach the orchestrator within the configured API timeout return `503` with `error.message_queue_len` instead of raising an internal-server error
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 

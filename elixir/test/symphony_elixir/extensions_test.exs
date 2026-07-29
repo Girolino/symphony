@@ -58,6 +58,24 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  defmodule FloodedOrchestrator do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
+    end
+
+    def init(opts), do: {:ok, opts}
+
+    def handle_call(:request_refresh, _from, state) do
+      send(Keyword.fetch!(state, :flooder), {:flood, self()})
+      Process.sleep(250)
+      {:reply, %{queued: true, requested_at: DateTime.utc_now()}, state}
+    end
+
+    def handle_info(_message, state), do: {:noreply, state}
+  end
+
   defmodule StaticOrchestrator do
     use GenServer
 
@@ -509,6 +527,35 @@ defmodule SymphonyElixir.ExtensionsTest do
                "generated_at" => timeout_payload["generated_at"],
                "error" => %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
              }
+  end
+
+  test "refresh timeout returns 503 with the flooded orchestrator queue depth" do
+    orchestrator = Module.concat(__MODULE__, :FloodedRefreshOrchestrator)
+    test_pid = self()
+
+    flooder =
+      spawn_link(fn ->
+        receive do
+          {:flood, pid} ->
+            Enum.each(1..500, fn index -> send(pid, {:codex_delta, index}) end)
+            send(test_pid, :flood_complete)
+        end
+      end)
+
+    {:ok, _pid} =
+      FloodedOrchestrator.start_link(
+        name: orchestrator,
+        flooder: flooder
+      )
+
+    start_test_endpoint(orchestrator: orchestrator, snapshot_timeout_ms: 25)
+
+    payload = json_response(post(build_conn(), "/api/v1/refresh", %{}), 503)
+
+    assert payload["error"]["code"] == "orchestrator_refresh_timeout"
+    assert payload["error"]["message"] == "Orchestrator refresh timed out"
+    assert payload["error"]["message_queue_len"] > 0
+    assert_receive :flood_complete
   end
 
   test "dashboard bootstraps liveview from embedded static assets" do

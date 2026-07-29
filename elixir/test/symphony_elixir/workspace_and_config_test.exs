@@ -584,6 +584,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
   end
 
+  test "dispatch revalidation skips a stale active issue once the tracker reports it terminal" do
+    stale_issue = %Issue{
+      id: "canceled-1",
+      identifier: "MT-1008",
+      title: "Canceled after snapshot",
+      state: "Todo",
+      blocked_by: []
+    }
+
+    canceled_issue = %{stale_issue | state: "Canceled"}
+    fetcher = fn ["canceled-1"] -> {:ok, [canceled_issue]} end
+
+    assert {:skip, %Issue{} = skipped_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
+
+    assert skipped_issue.identifier == "MT-1008"
+    assert skipped_issue.state == "Canceled"
+  end
+
   test "workspace remove returns error information for missing directory" do
     random_path =
       Path.join(
