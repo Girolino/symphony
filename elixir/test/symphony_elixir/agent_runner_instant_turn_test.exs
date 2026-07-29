@@ -195,8 +195,7 @@ defmodule SymphonyElixir.AgentRunnerInstantTurnTest do
     # A healthy tracker proving the issue active is NOT an unconfirmed
     # completion: latching it would put genuinely active work behind the
     # 5-minute backoff and its escalation ladder because its turns were short.
-    assert_received {:agent_run_outcome, "issue-1",
-                     %{confirmed?: true, reason: :instant_turn_bound_idle, issue_state: "In Progress"}}
+    assert_received {:agent_run_outcome, "issue-1", %{confirmed?: true, reason: :instant_turn_bound_idle, issue_state: "In Progress"}}
   end
 
   test "the bound reports UNCONFIRMED when the tracker will not answer", %{journal: j, clock: c} do
