@@ -1037,9 +1037,11 @@ defmodule SymphonyElixir.Codex.AppServer do
   @delta_emit_interval_ms 1_000
 
   @doc false
+  @spec delta_notification_for_test?(term()) :: boolean()
   def delta_notification_for_test?(method), do: delta_notification?(method)
 
   @doc false
+  @spec delta_emission_due_for_test?(String.t()) :: boolean()
   def delta_emission_due_for_test?(method), do: delta_emission_due?(method)
 
   defp delta_notification?(method) when is_binary(method) do
