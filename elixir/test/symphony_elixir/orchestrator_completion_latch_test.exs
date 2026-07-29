@@ -21,6 +21,14 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator
 
+  defmodule FakeOpsIssueFiler do
+    @spec file(String.t(), String.t(), keyword()) :: {:existing, map()}
+    def file(title, body, _opts) do
+      send(:completion_latch_test_process, {:ops_issue_filed, title, body})
+      {:existing, %{"identifier" => "SYM-TEST-INERT", "url" => "https://linear.example/test-ops-issue"}}
+    end
+  end
+
   @issue_id "issue-1"
 
   @issue %Issue{
@@ -34,11 +42,24 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
   }
 
   setup do
+    Process.register(self(), :completion_latch_test_process)
+
+    previous_ops_issue_filer = Application.get_env(:symphony_elixir, :ops_issue_filer)
+
+    Application.put_env(:symphony_elixir, :ops_issue_filer, FakeOpsIssueFiler)
+
     Application.put_env(
       :symphony_elixir,
       :metrics_ledger_file,
       Path.join(System.tmp_dir!(), "latch-ledger-#{System.unique_integer([:positive])}.json")
     )
+
+    on_exit(fn ->
+      case previous_ops_issue_filer do
+        nil -> Application.delete_env(:symphony_elixir, :ops_issue_filer)
+        value -> Application.put_env(:symphony_elixir, :ops_issue_filer, value)
+      end
+    end)
 
     :ok
   end
@@ -277,6 +298,8 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
       end)
 
     assert log =~ "4 times in a row"
+    assert_receive {:ops_issue_filed, "breaker parked: SYM-1", body}, 2_000
+    assert body =~ "parked SYM-1"
   end
 
   test "an unconfirmed ending never advances the circuit breaker" do

@@ -193,6 +193,11 @@ defmodule SymphonyElixir.Linear.ClientTest do
     assert Agent.get(counter, & &1) == 1
   end
 
+  test "test runs fail closed instead of posting default live Linear mutations" do
+    assert {:error, :test_live_linear_mutation_disabled} =
+             Client.graphql("mutation { issueUpdate(id: \"x\") { success } }", %{})
+  end
+
   test "a rate-limited mutation is still retried, because the request was rejected not applied" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

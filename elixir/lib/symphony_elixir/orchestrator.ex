@@ -413,8 +413,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp unconfirmed_endings(_entry), do: 0
-
   defp running_entry_issue_state(%{issue: %Issue{state: state}}), do: state
   defp running_entry_issue_state(_running_entry), do: nil
 
@@ -1395,6 +1393,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp file_parked_ops_issue(identifier, failures, error) do
+    filer = ops_issue_filer()
+
     Task.start(fn ->
       title = "breaker parked: #{identifier}"
 
@@ -1402,11 +1402,13 @@ defmodule SymphonyElixir.Orchestrator do
         "The lane circuit breaker parked #{identifier} after #{failures} consecutive failed runs. " <>
           "Last error: #{error}. Investigate the failure class; the issue stays parked until the daemon restarts or this is resolved."
 
-      file_ops_issue_with_retry("Breaker", title, body)
+      file_ops_issue_with_retry(filer, "Breaker", title, body)
     end)
   end
 
   defp file_linear_auth_ops_issue(reason) do
+    filer = ops_issue_filer()
+
     Task.start(fn ->
       title = "daemon Linear auth failure"
 
@@ -1414,7 +1416,7 @@ defmodule SymphonyElixir.Orchestrator do
         "The Symphony daemon could not authenticate to Linear before dispatch. " <>
           "Reason: #{inspect(reason)}. Worker dispatch is paused for this poll so completed Codex turns do not crash during issue-state refresh."
 
-      file_ops_issue_with_retry("Linear auth", title, body)
+      file_ops_issue_with_retry(filer, "Linear auth", title, body)
     end)
   end
 
@@ -1435,8 +1437,8 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :ops_issue_filer, SymphonyElixir.OpsIssue)
   end
 
-  defp file_ops_issue_with_retry(context, title, body) do
-    case ops_issue_filer().file(title, body, []) do
+  defp file_ops_issue_with_retry(filer, context, title, body) do
+    case filer.file(title, body, []) do
       {:created, issue} ->
         Logger.warning("#{context} ops issue created: #{issue["identifier"]}")
 
@@ -1445,12 +1447,12 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, first_reason} ->
         Process.sleep(30_000)
-        file_ops_issue_final(context, title, body, first_reason)
+        file_ops_issue_final(filer, context, title, body, first_reason)
     end
   end
 
-  defp file_ops_issue_final(context, title, body, first_reason) do
-    case ops_issue_filer().file(title, body, []) do
+  defp file_ops_issue_final(filer, context, title, body, first_reason) do
+    case filer.file(title, body, []) do
       {:created, issue} ->
         Logger.warning("#{context} ops issue created on retry: #{issue["identifier"]}")
 

@@ -115,6 +115,16 @@ defmodule SymphonyElixir.OpsIssueTest do
     assert message =~ "LINEAR_API_KEY"
   end
 
+  test "test runs fail closed instead of using the default live Linear transport" do
+    opts = [
+      get_env: fn "LINEAR_API_KEY" -> "live-looking-test-key" end,
+      bootstrap_path: "/nonexistent/bootstrap"
+    ]
+
+    assert {:error, :test_live_linear_ops_issue_disabled} =
+             OpsIssue.file("breaker parked: SYM-1", "body", opts)
+  end
+
   test "creates team-only when no project slug is configured" do
     opts = Keyword.put(base_opts(:fresh), :project_slug, nil)
 

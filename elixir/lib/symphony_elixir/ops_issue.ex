@@ -112,7 +112,8 @@ defmodule SymphonyElixir.OpsIssue do
     # lookup and create duplicates. Single-host serialization (promotion lock,
     # one lane daemon) makes this rare; Linear offers no uniqueness constraint
     # to close it server-side. Revisit if duplicate ops issues ever appear.
-    with {:ok, api_key} <- ProdSmoke.resolve_api_key(get_env, bootstrap_path),
+    with :ok <- prevent_test_live_linear_create(opts),
+         {:ok, api_key} <- ProdSmoke.resolve_api_key(get_env, bootstrap_path),
          {:ok, nil} <- find_existing(graphql_fun, api_key, team_key, title),
          {:ok, team} <- fetch_team(graphql_fun, api_key, team_key),
          {:ok, project_id} <- resolve_project_id(graphql_fun, api_key, project_slug) do
@@ -121,6 +122,16 @@ defmodule SymphonyElixir.OpsIssue do
       {:ok, %{} = issue} -> {:existing, issue}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  if Mix.env() == :test do
+    defp prevent_test_live_linear_create(opts) do
+      if Keyword.has_key?(opts, :graphql_fun),
+        do: :ok,
+        else: {:error, :test_live_linear_ops_issue_disabled}
+    end
+  else
+    defp prevent_test_live_linear_create(_opts), do: :ok
   end
 
   # A failed dedup lookup must NOT be read as "no issue exists" — creating on

@@ -168,7 +168,9 @@ defmodule SymphonyElixir.Linear.Client do
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
     sleep_fun = Keyword.get(opts, :sleep_fun, &Process.sleep/1)
 
-    do_graphql(payload, request_fun, sleep_fun, %{attempt: 0, spent_ms: 0})
+    with :ok <- prevent_test_live_linear_mutation(payload, opts) do
+      do_graphql(payload, request_fun, sleep_fun, %{attempt: 0, spent_ms: 0})
+    end
   end
 
   @spec validate_auth() :: :ok | {:error, term()}
@@ -362,6 +364,18 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   def idempotent_payload?(_payload), do: false
+
+  if Mix.env() == :test do
+    defp prevent_test_live_linear_mutation(payload, opts) do
+      cond do
+        Keyword.has_key?(opts, :request_fun) -> :ok
+        idempotent_payload?(payload) -> :ok
+        true -> {:error, :test_live_linear_mutation_disabled}
+      end
+    end
+  else
+    defp prevent_test_live_linear_mutation(_payload, _opts), do: :ok
+  end
 
   # Distinct, adapter-owned rate-limit category (SPEC 11.4). Callers that only
   # match {:linear_api_status, _} keep working through their catch-all clauses,
