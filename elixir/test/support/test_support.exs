@@ -173,6 +173,9 @@ defmodule SymphonyElixir.TestSupport do
           instant_turn_backoff_ms: nil,
           max_consecutive_instant_turns: nil,
           unconfirmed_completion_backoff_ms: nil,
+          unconfirmed_completion_max_backoff_ms: nil,
+          max_unconfirmed_endings: nil,
+          instant_turn_idle_backoff_ms: nil,
           max_consecutive_failures: nil,
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
@@ -215,6 +218,9 @@ defmodule SymphonyElixir.TestSupport do
     instant_turn_backoff_ms = Keyword.get(config, :instant_turn_backoff_ms)
     max_consecutive_instant_turns = Keyword.get(config, :max_consecutive_instant_turns)
     unconfirmed_completion_backoff_ms = Keyword.get(config, :unconfirmed_completion_backoff_ms)
+    unconfirmed_completion_max_backoff_ms = Keyword.get(config, :unconfirmed_completion_max_backoff_ms)
+    max_unconfirmed_endings = Keyword.get(config, :max_unconfirmed_endings)
+    instant_turn_idle_backoff_ms = Keyword.get(config, :instant_turn_idle_backoff_ms)
     max_consecutive_failures = Keyword.get(config, :max_consecutive_failures)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
@@ -260,6 +266,9 @@ defmodule SymphonyElixir.TestSupport do
         optional_agent_key("instant_turn_backoff_ms", instant_turn_backoff_ms),
         optional_agent_key("max_consecutive_instant_turns", max_consecutive_instant_turns),
         optional_agent_key("unconfirmed_completion_backoff_ms", unconfirmed_completion_backoff_ms),
+        optional_agent_key("unconfirmed_completion_max_backoff_ms", unconfirmed_completion_max_backoff_ms),
+        optional_agent_key("max_unconfirmed_endings", max_unconfirmed_endings),
+        optional_agent_key("instant_turn_idle_backoff_ms", instant_turn_idle_backoff_ms),
         optional_agent_key("max_consecutive_failures", max_consecutive_failures),
         "codex:",
         "  command: #{yaml_value(codex_command)}",

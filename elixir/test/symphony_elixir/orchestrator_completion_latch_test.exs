@@ -166,7 +166,7 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
   test "every unconfirmed ending reason latches, including the degraded and defer paths" do
     write_config!(unconfirmed_completion_backoff_ms: 300_000)
 
-    for reason <- [:instant_turn_bound, :refresh_exhausted, :refresh_deferred, :max_turns_stale, :response_timeout] do
+    for reason <- [:instant_turn_bound, :refresh_exhausted, :refresh_deferred, :max_turns_stale] do
       ExUnit.CaptureLog.capture_log(fn ->
         {_state, entry, delay_ms} =
           agent_down_retry(%{confirmed?: false, reason: reason, issue_state: "In Progress"})
@@ -177,8 +177,29 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
     end
   end
 
+  test "a confirmed-but-idle instant-turn bound backs off without touching the ladder" do
+    write_config!(instant_turn_idle_backoff_ms: 120_000, unconfirmed_completion_backoff_ms: 300_000)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      {state, entry, delay_ms} =
+        agent_down_retry(
+          %{confirmed?: true, reason: :instant_turn_bound_idle, issue_state: "In Progress"},
+          %{unconfirmed_endings: 2}
+        )
+
+      # Not the 1s continuation (the agent is idle; re-dispatching in a second
+      # re-sends the full context to learn the same thing) and not the latch
+      # (a successful read proved the issue active).
+      assert delay_ms > 115_000
+      assert delay_ms <= 125_000
+      assert entry.unconfirmed_endings == 0
+      assert entry.failures == 0
+      assert state.parked == %{}
+    end)
+  end
+
   test "repeated unconfirmed endings escalate" do
-    write_config!(unconfirmed_completion_backoff_ms: 60_000, max_retry_backoff_ms: 600_000)
+    write_config!(unconfirmed_completion_backoff_ms: 60_000)
 
     ExUnit.CaptureLog.capture_log(fn ->
       {_state, entry, delay_ms} =
@@ -194,8 +215,22 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
     end)
   end
 
-  test "escalation is capped at agent.max_retry_backoff_ms" do
-    write_config!(unconfirmed_completion_backoff_ms: 60_000, max_retry_backoff_ms: 600_000)
+  test "escalation is live at the SHIPPED defaults, not only under an overridden cap" do
+    # The regression this guards: the ladder used to be capped by
+    # agent.max_retry_backoff_ms, whose default (300_000) equals the latch base
+    # default, so min(base * 2^(n-1), cap) returned 300_000 for every n and the
+    # whole escalation was arithmetically dead unless an operator happened to
+    # raise an unrelated key.
+    write_config!([])
+
+    assert Orchestrator.unconfirmed_completion_delay(1) == 300_000
+    assert Orchestrator.unconfirmed_completion_delay(2) == 600_000
+    assert Orchestrator.unconfirmed_completion_delay(3) == 1_200_000
+    assert Orchestrator.unconfirmed_completion_delay(4) == 2_400_000
+  end
+
+  test "escalation is capped at agent.unconfirmed_completion_max_backoff_ms" do
+    write_config!(unconfirmed_completion_backoff_ms: 60_000, unconfirmed_completion_max_backoff_ms: 600_000)
 
     assert Orchestrator.unconfirmed_completion_delay(1) == 60_000
     assert Orchestrator.unconfirmed_completion_delay(2) == 120_000
@@ -203,6 +238,45 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
     # 60s * 2^4 = 960s would exceed the cap
     assert Orchestrator.unconfirmed_completion_delay(5) == 600_000
     assert Orchestrator.unconfirmed_completion_delay(50) == 600_000
+  end
+
+  test "a cap below the base is rejected at config load instead of flattening the ladder" do
+    write_config!(unconfirmed_completion_backoff_ms: 300_000, unconfirmed_completion_max_backoff_ms: 60_000)
+
+    assert {:error, reason} = SymphonyElixir.Config.settings()
+    assert inspect(reason) =~ "unconfirmed_completion_max_backoff_ms"
+  end
+
+  test "consecutive unconfirmed endings terminate in a park, not an endless throttled loop" do
+    write_config!(unconfirmed_completion_backoff_ms: 300_000, max_unconfirmed_endings: 3)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        ref = make_ref()
+
+        state =
+          base_state(
+            running: %{
+              @issue_id =>
+                running_entry(ref, %{
+                  unconfirmed_endings: 3,
+                  run_outcome: %{confirmed?: false, reason: :instant_turn_bound, issue_state: "In Progress"}
+                })
+            },
+            claimed: MapSet.new([@issue_id])
+          )
+
+        {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), :normal}, state)
+
+        # Without this bound the issue re-dispatches a fresh paid Codex session
+        # at the capped interval forever: failure? is false, so the breaker
+        # never sees it and nothing ever surfaces the stuck issue.
+        refute Map.has_key?(state.retry_attempts, @issue_id)
+        assert Map.has_key?(state.parked, @issue_id)
+        assert state.parked[@issue_id].failures == 4
+      end)
+
+    assert log =~ "4 times in a row"
   end
 
   test "an unconfirmed ending never advances the circuit breaker" do
@@ -294,7 +368,7 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
     end
 
     test "a read showing the same active state keeps the latch and its escalation" do
-      write_config!(unconfirmed_completion_backoff_ms: 300_000, max_retry_backoff_ms: 3_600_000)
+      write_config!(unconfirmed_completion_backoff_ms: 300_000)
 
       ExUnit.CaptureLog.capture_log(fn ->
         {_state, entry} = fire_retry([@issue])
@@ -305,6 +379,96 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
         assert entry.due_at_ms - System.monotonic_time(:millisecond) > 500_000
       end)
     end
+  end
+
+  test "a latched retry whose own tracker read fails keeps the latch delay" do
+    # The condition the latch exists for has not gone away: Linear is still
+    # throttled when the retry fires. Rebuilding metadata from the popped retry
+    # entry loses delay_type, and falling through to the failure ladder would
+    # collapse a 5-minute latch to 20 seconds inside that throttle window.
+    write_config!(unconfirmed_completion_backoff_ms: 300_000)
+
+    metadata = %{identifier: "SYM-1", failures: 0, unconfirmed_endings: 2, last_issue_state: "In Progress"}
+
+    assert Orchestrator.retry_delay_for_test(2, metadata) == 600_000
+    assert Orchestrator.retry_delay_for_test(7, metadata) == 600_000
+  end
+
+  test "a failure retry drops a carried unconfirmed count instead of borrowing the latch delay" do
+    write_config!(unconfirmed_completion_backoff_ms: 300_000)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      ref = make_ref()
+
+      state =
+        base_state(
+          running: %{@issue_id => running_entry(ref, %{unconfirmed_endings: 2})},
+          claimed: MapSet.new([@issue_id])
+        )
+
+      {:noreply, state} = Orchestrator.handle_info({:DOWN, ref, :process, self(), {:shutdown, :boom}}, state)
+      entry = Map.get(state.retry_attempts, @issue_id)
+      if is_reference(entry[:timer_ref]), do: Process.cancel_timer(entry.timer_ref)
+
+      # A crashed run is a different failure class: it advances the breaker,
+      # so it must land on the failure ladder the breaker counts.
+      assert entry.failures == 1
+      assert entry.unconfirmed_endings == 0
+      assert entry.due_at_ms - System.monotonic_time(:millisecond) < 60_000
+    end)
+  end
+
+  test "a latched retry whose dispatch cannot start re-arms instead of stranding the claim" do
+    write_config!(unconfirmed_completion_backoff_ms: 300_000)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        # The retry read succeeds and shows the issue active, so it dispatches;
+        # the dispatch-time revalidation then fails (the tracker is still
+        # throttled). pop_retry_attempt_state/3 has already deleted the retry
+        # entry and the claim was deliberately kept, so without a re-arm the
+        # issue sits claimed with no running entry, no retry and no timer -
+        # invisible to should_dispatch_issue?/4 until the daemon restarts.
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [@issue])
+        Application.put_env(:symphony_elixir, :memory_tracker_state_error, {:linear_api_status, 429})
+        token = make_ref()
+
+        state =
+          base_state(
+            claimed: MapSet.new([@issue_id]),
+            retry_attempts: %{
+              @issue_id => %{
+                attempt: 1,
+                failures: 0,
+                timer_ref: nil,
+                retry_token: token,
+                due_at_ms: 0,
+                identifier: "SYM-1",
+                error: nil,
+                worker_host: nil,
+                workspace_path: nil,
+                unconfirmed_endings: 2,
+                last_issue_state: "In Progress"
+              }
+            }
+          )
+
+        {:noreply, state} = Orchestrator.handle_info({:retry_issue, @issue_id, token}, state)
+
+        entry = Map.get(state.retry_attempts, @issue_id)
+        if is_reference(entry[:timer_ref]), do: Process.cancel_timer(entry.timer_ref)
+
+        assert state.running == %{}
+        assert MapSet.member?(state.claimed, @issue_id)
+        assert entry, "the claim was stranded with nothing scheduled"
+        # still latched, so the re-arm waits the escalated latch delay
+        assert entry.unconfirmed_endings == 2
+        assert entry.due_at_ms - System.monotonic_time(:millisecond) > 500_000
+      end)
+
+    assert log =~ "re-arming the retry"
+  after
+    Application.delete_env(:symphony_elixir, :memory_tracker_state_error)
   end
 
   test "resolve_unconfirmed_latch leaves a never-latched issue on the normal delays" do

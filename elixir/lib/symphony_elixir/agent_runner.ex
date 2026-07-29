@@ -243,7 +243,14 @@ defmodule SymphonyElixir.AgentRunner do
           "follow-up Codex turn start failed for #{issue_context(issue)} thread_id=#{ctx.app_session[:thread_id]} turn=#{turn_number}/#{max_turns}: :response_timeout; returning control to orchestrator continuation retry"
         )
 
-        end_run(ctx, issue, false, :response_timeout)
+        # CONFIRMED, deliberately. SPEC 11.4.1 defines an unconfirmed ending as
+        # one where the TRACKER could not be read; this is the Codex
+        # app-server transport timing out while starting a turn. Nothing about
+        # the tracker is in doubt, and the orchestrator's continuation retry
+        # re-reads the issue anyway. Latching it here would idle a healthy
+        # issue for five minutes and poison the unconfirmed escalation counter
+        # with a Codex-side flake.
+        end_run(ctx, issue, true, :response_timeout)
 
       {:error, reason} ->
         {:error, reason}
@@ -274,10 +281,10 @@ defmodule SymphonyElixir.AgentRunner do
       Logger.warning(
         "ending agent run for #{issue_context(issue)} after #{instant_turns} consecutive instant turn(s) " <>
           "(last elapsed_ms=#{elapsed_ms} < agent.instant_turn_threshold_ms=#{ctx.instant_turn_threshold_ms}) " <>
-          "turn=#{turn_number}/#{max_turns}; the model has nothing left to do and the terminal state is unconfirmed"
+          "turn=#{turn_number}/#{max_turns}; the model has nothing left to do"
       )
 
-      end_run(ctx, issue, false, :instant_turn_bound)
+      end_at_instant_turn_bound(ctx, issue, turn)
     else
       Logger.warning(
         "instant turn for #{issue_context(issue)} elapsed_ms=#{elapsed_ms} < " <>
@@ -288,6 +295,42 @@ defmodule SymphonyElixir.AgentRunner do
       ctx.sleep_fun.(ctx.instant_turn_backoff_ms)
 
       handle_turn_boundary(ctx, issue, turn_session, %{turn | instant: instant_turns})
+    end
+  end
+
+  # Reaching the instant-turn bound says the MODEL has nothing to do. It says
+  # nothing about the tracker, and on a healthy tracker the boundary refreshes
+  # between the instant turns just succeeded. Reporting the ending as
+  # unconfirmed without looking would throw that evidence away and put a
+  # legitimately active issue behind the five-minute latch (and its escalation
+  # ladder) because its turns happened to be short - checking a still-running
+  # CI job, posting a handoff comment. So the bound performs the boundary read
+  # it would otherwise skip and reports what it actually learns. No backoff
+  # first: this read is not trying to outlast a throttle window, and if it does
+  # fail the latch is exactly the right answer.
+  defp end_at_instant_turn_bound(ctx, issue, %{degraded: degraded_turns}) do
+    case continue_with_issue?(issue, ctx.issue_state_fetcher, degraded_turns) do
+      {:done, refreshed_issue} ->
+        end_run(ctx, refreshed_issue, true, :terminal)
+
+      {:continue, refreshed_issue} ->
+        Logger.info(
+          "instant-turn bound for #{issue_context(refreshed_issue)} on a SUCCESSFUL refresh showing " <>
+            "state=#{inspect(refreshed_issue.state)}; the run is idle, not unconfirmed"
+        )
+
+        end_run(ctx, refreshed_issue, true, :instant_turn_bound_idle)
+
+      {:degraded_continue, stale_issue} ->
+        end_run(ctx, stale_issue, false, :instant_turn_bound)
+
+      {:unconfirmed, stale_issue} ->
+        end_run(ctx, stale_issue, false, :instant_turn_bound)
+
+      {:defer, reason} ->
+        Logger.warning("instant-turn bound refresh deferred for #{issue_context(issue)}: #{inspect(reason)}")
+
+        end_run(ctx, issue, false, :instant_turn_bound)
     end
   end
 

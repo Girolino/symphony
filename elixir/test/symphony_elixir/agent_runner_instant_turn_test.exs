@@ -174,10 +174,80 @@ defmodule SymphonyElixir.AgentRunnerInstantTurnTest do
     assert Enum.count(events(j), &(&1 == :turn)) == 3
     assert Enum.count(events(j), &match?({:sleep, _}, &1)) == 2
     assert log =~ "after 3 consecutive instant turn(s)"
+  end
 
-    # Ending on the instant bound proves nothing about the issue's real state,
-    # so the orchestrator must be told the completion is unconfirmed.
-    assert_received {:agent_run_outcome, "issue-1", %{confirmed?: false, reason: :instant_turn_bound, issue_state: "In Progress"}}
+  test "the bound reports IDLE, not unconfirmed, when the tracker answers", %{journal: j, clock: c} do
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok =
+                 AgentRunner.run_codex_turns_for_test(
+                   @issue,
+                   run_opts(j, c, [1_100], max_turns: 24)
+                 )
+      end)
+
+    # The bound performs the boundary read instead of skipping it, so the two
+    # successful "issue is active" refreshes between the instant turns are not
+    # the only evidence thrown away - the ending itself is checked.
+    assert Enum.count(events(j), &(&1 == :refresh)) == 3
+    assert log =~ "on a SUCCESSFUL refresh"
+
+    # A healthy tracker proving the issue active is NOT an unconfirmed
+    # completion: latching it would put genuinely active work behind the
+    # 5-minute backoff and its escalation ladder because its turns were short.
+    assert_received {:agent_run_outcome, "issue-1",
+                     %{confirmed?: true, reason: :instant_turn_bound_idle, issue_state: "In Progress"}}
+  end
+
+  test "the bound reports UNCONFIRMED when the tracker will not answer", %{journal: j, clock: c} do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "test-key",
+      instant_turn_threshold_ms: 5_000,
+      instant_turn_backoff_ms: 30_000,
+      max_consecutive_instant_turns: 1
+    )
+
+    fetcher = fn ["issue-1"] ->
+      record(j, :refresh)
+      {:error, {:tracker_rate_limited, %{status: 429, retry_after_ms: 60_000}}}
+    end
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert :ok =
+               AgentRunner.run_codex_turns_for_test(
+                 @issue,
+                 run_opts(j, c, [1_100], max_turns: 24, issue_state_fetcher: fetcher)
+               )
+    end)
+
+    # This is the production case: instant turns AND a throttled tracker.
+    assert_received {:agent_run_outcome, "issue-1", %{confirmed?: false, reason: :instant_turn_bound}}
+  end
+
+  test "the bound reports a terminal state it finally manages to read", %{journal: j, clock: c} do
+    fetches = :counters.new(1, [])
+
+    fetcher = fn ["issue-1"] ->
+      record(j, :refresh)
+      :counters.add(fetches, 1, 1)
+
+      # Throttled for the first two boundaries, answering by the bound.
+      if :counters.get(fetches, 1) >= 3 do
+        {:ok, [%{@issue | state: "Done"}]}
+      else
+        {:ok, [@issue]}
+      end
+    end
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert :ok =
+               AgentRunner.run_codex_turns_for_test(
+                 @issue,
+                 run_opts(j, c, [1_100], max_turns: 24, issue_state_fetcher: fetcher)
+               )
+    end)
+
+    assert_received {:agent_run_outcome, "issue-1", %{confirmed?: true, reason: :terminal, issue_state: "Done"}}
   end
 
   test "a real turn resets the consecutive instant counter", %{journal: j, clock: c} do
@@ -193,7 +263,7 @@ defmodule SymphonyElixir.AgentRunnerInstantTurnTest do
     # Without the reset the run would end at turn 3; the real turn at 3 clears
     # the counter and the bound is only reached at turn 6.
     assert Enum.count(events(j), &(&1 == :turn)) == 6
-    assert_received {:agent_run_outcome, "issue-1", %{reason: :instant_turn_bound}}
+    assert_received {:agent_run_outcome, "issue-1", %{reason: :instant_turn_bound_idle}}
   end
 
   test "instant turns still respect a terminal state seen after the backoff", %{journal: j, clock: c} do
@@ -214,6 +284,35 @@ defmodule SymphonyElixir.AgentRunnerInstantTurnTest do
     # refresh that finally sees Done instead of spinning.
     assert events(j) == [:turn, {:sleep, 30_000}, :refresh]
     assert_received {:agent_run_outcome, "issue-1", %{confirmed?: true, reason: :terminal}}
+  end
+
+  test "a follow-up turn transport timeout is NOT an unconfirmed ending", %{journal: j, clock: c} do
+    turns = :counters.new(1, [])
+
+    run_turn_fun = fn _session, _prompt, _issue, _opts ->
+      record(j, :turn)
+      :counters.add(turns, 1, 1)
+
+      if :counters.get(turns, 1) == 1 do
+        {:ok, %{session_id: "session-1"}}
+      else
+        {:error, :response_timeout}
+      end
+    end
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert :ok =
+               AgentRunner.run_codex_turns_for_test(
+                 @issue,
+                 run_opts(j, c, [60_000], max_turns: 24, run_turn_fun: run_turn_fun)
+               )
+    end)
+
+    # The Codex app-server hiccupped; nothing about the TRACKER is in doubt.
+    # Reporting this as unconfirmed would idle a healthy issue for five minutes
+    # instead of the 1s continuation and would inflate the escalation counter
+    # that a later genuine tracker throttle starts from.
+    assert_received {:agent_run_outcome, "issue-1", %{confirmed?: true, reason: :response_timeout}}
   end
 
   test "an exhausted degraded budget reports an unconfirmed ending, not a completion", %{journal: j, clock: c} do

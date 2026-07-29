@@ -256,6 +256,9 @@ defmodule SymphonyElixir.Orchestrator do
       unconfirmed_run_ending?(running_entry) ->
         latch_unconfirmed_completion(state, issue_id, running_entry, session_id)
 
+      idle_run_ending?(running_entry) ->
+        backoff_idle_completion(state, issue_id, running_entry, session_id)
+
       true ->
         Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
@@ -289,7 +292,9 @@ defmodule SymphonyElixir.Orchestrator do
   # issues, 74 RATELIMITED errors, 0 recorded completions. So an unconfirmed
   # ending latches the issue: it keeps its claim (so the poll loop skips it)
   # and its next dispatch eligibility is a real backoff that escalates while
-  # the endings stay unconfirmed, capped at agent.max_retry_backoff_ms.
+  # the endings stay unconfirmed, capped at
+  # agent.unconfirmed_completion_max_backoff_ms and bounded by
+  # agent.max_unconfirmed_endings, past which the issue parks.
   #
   # The latch is not a timer the orchestrator has to clear: the retry firing
   # performs a fresh tracker read, and that read is what resolves it - terminal
@@ -300,6 +305,45 @@ defmodule SymphonyElixir.Orchestrator do
     endings = unconfirmed_endings(running_entry) + 1
     outcome = Map.get(running_entry, :run_outcome, %{})
 
+    if unconfirmed_endings_exhausted?(endings) do
+      park_exhausted_unconfirmed_issue(state, issue_id, running_entry, session_id, endings, outcome)
+    else
+      do_latch_unconfirmed_completion(state, issue_id, running_entry, session_id, endings, outcome)
+    end
+  end
+
+  # The latch throttles the spin but on its own never ends it: an issue whose
+  # terminal state can never be confirmed - work an operator finished but left
+  # in an active state, a tracker that stays throttled - would re-dispatch a
+  # fresh paid Codex session at the capped interval forever, with failure? set
+  # to false so the breaker never sees it. Bounding CONSECUTIVE unconfirmed
+  # endings gives the loop a terminating condition and a human-visible signal;
+  # the parked reconciliation unparks the issue the moment it reads terminal.
+  defp park_exhausted_unconfirmed_issue(%State{} = state, issue_id, running_entry, session_id, endings, outcome) do
+    Logger.error(
+      "Agent runs for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} " <>
+        "session_id=#{session_id} ended without a confirmed terminal state #{endings} times in a row " <>
+        "(last reason=#{inspect(Map.get(outcome, :reason))}); parking instead of re-dispatching indefinitely"
+    )
+
+    state
+    |> complete_issue(issue_id)
+    |> park_issue(issue_id, endings, %{}, %{
+      identifier: running_entry.identifier,
+      error:
+        "#{endings} consecutive agent runs ended without a confirmed terminal tracker read " <>
+          "(last reason: #{inspect(Map.get(outcome, :reason))})"
+    })
+  end
+
+  defp unconfirmed_endings_exhausted?(endings) do
+    case Config.settings!().agent.max_unconfirmed_endings do
+      max when is_integer(max) and max > 0 -> endings > max
+      _ -> false
+    end
+  end
+
+  defp do_latch_unconfirmed_completion(%State{} = state, issue_id, running_entry, session_id, endings, outcome) do
     Logger.warning(
       "Agent task ended without a confirmed terminal state for issue_id=#{issue_id} " <>
         "issue_identifier=#{running_entry.identifier} session_id=#{session_id} " <>
@@ -326,6 +370,40 @@ defmodule SymphonyElixir.Orchestrator do
       %{confirmed?: false} -> true
       _ -> false
     end
+  end
+
+  # The instant-turn bound reached on a SUCCESSFUL tracker read: the issue is
+  # provably still active and the tracker is answering, so this is not the
+  # unconfirmed latch's business - no escalation, no counter, no park. But the
+  # 1s continuation is wrong too: an agent that just produced
+  # max_consecutive_instant_turns sub-threshold turns is idle (waiting on CI,
+  # on a review), and re-dispatching it a second later re-sends the full model
+  # context to learn the same thing. A flat idle backoff instead.
+  defp idle_run_ending?(running_entry) do
+    case Map.get(running_entry, :run_outcome) do
+      %{reason: :instant_turn_bound_idle} -> true
+      _ -> false
+    end
+  end
+
+  defp backoff_idle_completion(%State{} = state, issue_id, running_entry, session_id) do
+    Logger.info(
+      "Agent task ended idle at the instant-turn bound for issue_id=#{issue_id} " <>
+        "issue_identifier=#{running_entry.identifier} session_id=#{session_id}; " <>
+        "the tracker confirmed the issue is still active, backing off instead of re-dispatching in 1s"
+    )
+
+    state
+    |> complete_issue(issue_id)
+    |> schedule_issue_retry(issue_id, 1, %{
+      identifier: running_entry.identifier,
+      delay_type: :idle_backoff,
+      failure?: false,
+      # a confirmed read cleared the doubt, so the unconfirmed ladder resets
+      unconfirmed_endings: 0,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
   end
 
   defp unconfirmed_endings(entry) when is_map(entry) do
@@ -1255,10 +1333,17 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  # A failure retry breaks the run of consecutive unconfirmed endings: it is a
+  # different failure class, it advances the breaker, and letting a stale
+  # unconfirmed count survive would put a crashed run on the latch's escalating
+  # delay instead of the failure ladder the breaker is counting.
   defp pick_unconfirmed_endings(previous_retry, metadata) do
     case Map.get(metadata, :unconfirmed_endings) do
-      count when is_integer(count) and count >= 0 -> count
-      _ -> unconfirmed_endings(previous_retry)
+      count when is_integer(count) and count >= 0 ->
+        count
+
+      _ ->
+        if Map.get(metadata, :failure?, true), do: 0, else: unconfirmed_endings(previous_retry)
     end
   end
 
@@ -1558,15 +1643,17 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply,
-       dispatch_issue(
-         state,
-         issue,
-         attempt,
-         metadata[:worker_host],
-         Map.get(metadata, :failures, 0),
-         Map.get(metadata, :unconfirmed_endings, 0)
-       )}
+      dispatched =
+        dispatch_issue(
+          state,
+          issue,
+          attempt,
+          metadata[:worker_host],
+          Map.get(metadata, :failures, 0),
+          Map.get(metadata, :unconfirmed_endings, 0)
+        )
+
+      {:noreply, rearm_retry_if_dispatch_did_not_start(dispatched, issue, attempt, metadata)}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1583,6 +1670,36 @@ defmodule SymphonyElixir.Orchestrator do
        )}
     end
   end
+
+  # pop_retry_attempt_state/3 has already DELETED the retry entry by the time
+  # dispatch runs, while the claim is deliberately retained. Every branch of
+  # dispatch_issue/6 that does not start a run - revalidation error (the
+  # tracker that the latch exists for is still failing), a stale/blocked skip,
+  # an issue that vanished, another session holding the run lease, no worker
+  # capacity - returns state unchanged. That leaves the issue claimed with no
+  # running entry, no retry entry and no timer: should_dispatch_issue?/4 skips
+  # claimed issues, and nothing reconciles claimed-without-running-or-retry, so
+  # the issue is invisible until the daemon restarts. Re-arm the retry so the
+  # next tracker read resolves it (terminal or gone releases the claim).
+  defp rearm_retry_if_dispatch_did_not_start(%State{} = state, %Issue{id: issue_id} = issue, attempt, metadata) do
+    if Map.has_key?(state.running, issue_id) or not MapSet.member?(state.claimed, issue_id) do
+      state
+    else
+      Logger.warning("Dispatch did not start for #{issue_context(issue)}; re-arming the retry so the claim is not stranded")
+
+      schedule_issue_retry(
+        state,
+        issue_id,
+        attempt + 1,
+        Map.merge(metadata, %{
+          error: "dispatch did not start; re-armed retry",
+          failure?: false
+        })
+      )
+    end
+  end
+
+  defp rearm_retry_if_dispatch_did_not_start(%State{} = state, _issue, _attempt, _metadata), do: state
 
   # The retry that fires under an unconfirmed-completion latch performs a fresh
   # candidate fetch; reaching here means that read SUCCEEDED and showed the
@@ -1631,8 +1748,20 @@ defmodule SymphonyElixir.Orchestrator do
       metadata[:delay_type] == :unconfirmed_completion ->
         unconfirmed_completion_delay(Map.get(metadata, :unconfirmed_endings, 1))
 
+      metadata[:delay_type] == :idle_backoff ->
+        Config.settings!().agent.instant_turn_idle_backoff_ms
+
       metadata[:delay_type] == :continuation and attempt == 1 ->
         @continuation_retry_delay_ms
+
+      # A live latch that lost its delay_type still gets the latch delay.
+      # Reschedules built from a popped retry entry (a retry whose own tracker
+      # read failed, a dispatch that could not start) rebuild metadata from the
+      # persisted fields, which carry unconfirmed_endings but not delay_type;
+      # falling through to failure_retry_delay/1 would collapse a 5-minute
+      # latch to 20 seconds inside the very throttle window it exists for.
+      is_nil(metadata[:delay_type]) and unconfirmed_endings(metadata) > 0 ->
+        unconfirmed_completion_delay(unconfirmed_endings(metadata))
 
       true ->
         failure_retry_delay(attempt)
@@ -1646,7 +1775,7 @@ defmodule SymphonyElixir.Orchestrator do
     base = config.unconfirmed_completion_backoff_ms
     power = min(max(endings, 1) - 1, 10)
 
-    min(base * (1 <<< power), config.max_retry_backoff_ms)
+    min(base * (1 <<< power), config.unconfirmed_completion_max_backoff_ms)
   end
 
   defp failure_retry_delay(attempt) do
