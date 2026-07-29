@@ -18,8 +18,8 @@ defmodule SymphonyElixir.OrchestratorCompletionLatchTest do
 
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Orchestrator
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator
 
   @issue_id "issue-1"
 
