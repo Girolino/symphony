@@ -141,6 +141,33 @@ defmodule SymphonyElixir.Config.Schema do
       # Role isolation: crossing into/out of these states ends the session so
       # the next dispatch is a fresh session in the new role (empty = off).
       field(:role_boundary_states, {:array, :string}, default: [])
+      # Post-completion spin control. A turn that completes faster than
+      # instant_turn_threshold_ms did no work (the model replies "already Done"
+      # in ~1s). Back off between such turns and bound how many in a row a run
+      # may burn; what the ending then MEANS is decided by the boundary read at
+      # the bound, not by the instant turns themselves.
+      # instant_turn_threshold_ms: 0 disables instant-turn detection entirely.
+      field(:instant_turn_threshold_ms, :integer, default: 5_000)
+      field(:instant_turn_backoff_ms, :integer, default: 30_000)
+      field(:max_consecutive_instant_turns, :integer, default: 3)
+      # Hitting the instant-turn bound while the tracker is HEALTHY is not an
+      # unconfirmed ending - it is an idle agent (waiting on CI, on a review).
+      # It gets its own flat backoff instead of the 1s continuation, with no
+      # escalation and no effect on the unconfirmed counter.
+      field(:instant_turn_idle_backoff_ms, :integer, default: 300_000)
+      field(:unconfirmed_completion_backoff_ms, :integer, default: 300_000)
+      # The unconfirmed ladder needs its OWN cap: max_retry_backoff_ms defaults
+      # to 300_000, which equals the latch base, so sharing it would make
+      # min(base * 2^(n-1), cap) return the base forever and the escalation
+      # would be arithmetically dead at the shipped defaults.
+      field(:unconfirmed_completion_max_backoff_ms, :integer, default: 3_600_000)
+      # Terminating condition. Without it a permanently unconfirmable issue
+      # (finished work an operator never moved out of an active state, a
+      # tracker that stays throttled) re-dispatches a fresh paid Codex session
+      # forever: throttled, but never escalating out and never surfacing.
+      # Exceeding this parks the issue and files an ops issue; the parked
+      # reconciliation unparks it as soon as the issue reads terminal.
+      field(:max_unconfirmed_endings, :integer, default: 5)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -155,7 +182,14 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_agents_by_state,
           :max_consecutive_failures,
           :blocked_max_age_ms,
-          :role_boundary_states
+          :role_boundary_states,
+          :instant_turn_threshold_ms,
+          :instant_turn_backoff_ms,
+          :max_consecutive_instant_turns,
+          :instant_turn_idle_backoff_ms,
+          :unconfirmed_completion_backoff_ms,
+          :unconfirmed_completion_max_backoff_ms,
+          :max_unconfirmed_endings
         ],
         empty_values: []
       )
@@ -164,8 +198,34 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> validate_number(:max_consecutive_failures, greater_than: 0)
       |> validate_number(:blocked_max_age_ms, greater_than: 0)
+      |> validate_number(:instant_turn_threshold_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:instant_turn_backoff_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_consecutive_instant_turns, greater_than: 0)
+      |> validate_number(:instant_turn_idle_backoff_ms, greater_than: 0)
+      |> validate_number(:unconfirmed_completion_backoff_ms, greater_than: 0)
+      |> validate_number(:unconfirmed_completion_max_backoff_ms, greater_than: 0)
+      |> validate_number(:max_unconfirmed_endings, greater_than: 0)
+      |> validate_unconfirmed_backoff_ladder()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+    end
+
+    # A cap below the base silently flattens the escalation ladder to a
+    # constant. Reject it at load time instead of shipping a mechanism whose
+    # every step returns the same number.
+    defp validate_unconfirmed_backoff_ladder(changeset) do
+      base = get_field(changeset, :unconfirmed_completion_backoff_ms)
+      cap = get_field(changeset, :unconfirmed_completion_max_backoff_ms)
+
+      if is_integer(base) and is_integer(cap) and cap < base do
+        add_error(
+          changeset,
+          :unconfirmed_completion_max_backoff_ms,
+          "must be greater than or equal to unconfirmed_completion_backoff_ms (#{base})"
+        )
+      else
+        changeset
+      end
     end
   end
 

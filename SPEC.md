@@ -425,6 +425,36 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
+- `instant_turn_threshold_ms` (non-negative integer)
+  - Default: `5000`
+  - A coding-agent turn whose wall-clock duration is strictly below this is an *instant turn*: the
+    model returned without doing work. `0` disables instant-turn detection.
+- `instant_turn_backoff_ms` (non-negative integer)
+  - Default: `30000`
+  - Slept in the agent worker (never in the orchestrator) after an instant turn and BEFORE the
+    turn-boundary tracker refresh.
+- `max_consecutive_instant_turns` (positive integer)
+  - Default: `3`
+  - Consecutive instant turns that end the run normally. A non-instant turn resets the count.
+- `instant_turn_idle_backoff_ms` (positive integer)
+  - Default: `300000` (5 minutes)
+  - Delay before re-dispatch when a run ended on the instant-turn bound but the boundary read
+    SUCCEEDED and showed the issue still active. Flat: no escalation, no effect on the unconfirmed
+    counter.
+- `unconfirmed_completion_backoff_ms` (positive integer)
+  - Default: `300000` (5 minutes)
+  - Base delay before an issue whose run ended without a confirmed terminal read becomes eligible
+    for re-dispatch. Escalates as
+    `min(base * 2^(endings - 1), agent.unconfirmed_completion_max_backoff_ms)`.
+- `unconfirmed_completion_max_backoff_ms` (positive integer)
+  - Default: `3600000` (1 hour)
+  - Cap for the escalation above. MUST be `>= unconfirmed_completion_backoff_ms`; a smaller value is
+    a config error. This is deliberately NOT `max_retry_backoff_ms`, whose default equals the latch
+    base and would flatten every rung of the ladder to the same value.
+- `max_unconfirmed_endings` (positive integer)
+  - Default: `5`
+  - Consecutive unconfirmed endings after which the issue is PARKED (with an ops issue) instead of
+    re-dispatched again. This is the latch's terminating condition.
 
 #### 5.3.6 `codex` (object)
 
@@ -590,6 +620,13 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `agent.instant_turn_threshold_ms`: integer, default `5000` (`0` disables)
+- `agent.instant_turn_backoff_ms`: integer, default `30000`
+- `agent.max_consecutive_instant_turns`: integer, default `3`
+- `agent.instant_turn_idle_backoff_ms`: integer, default `300000` (5m)
+- `agent.unconfirmed_completion_backoff_ms`: integer, default `300000` (5m)
+- `agent.unconfirmed_completion_max_backoff_ms`: integer, default `3600000` (1h)
+- `agent.max_unconfirmed_endings`: integer, default `5`
 - `codex.command`: shell command string, default `codex app-server`
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
@@ -762,6 +799,12 @@ Retry entry creation:
 Backoff formula:
 
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
+- Continuation retries after an *unconfirmed* run ending (see 11.4) instead use
+  `delay = min(agent.unconfirmed_completion_backoff_ms * 2^(unconfirmed_endings - 1), agent.unconfirmed_completion_max_backoff_ms)`.
+  A retry entry that carries a non-zero `unconfirmed_endings` keeps this delay even when it is
+  rescheduled from a path that no longer knows the original delay type.
+- Continuation retries after an *idle* run ending (the instant-turn bound on a successful read) use
+  the flat `agent.instant_turn_idle_backoff_ms`.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
 
@@ -1210,6 +1253,63 @@ Orchestrator behavior on tracker errors:
 - Candidate fetch failure: log and skip dispatch for this tick.
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
+
+#### 11.4.1 Post-Completion Spin Control
+
+A throttled tracker makes the orchestrator unable to observe that an issue already finished. The
+model, asked to continue, answers "this is already Done" in about a second; the boundary refresh
+that would confirm it is rate-limited; the run is re-dispatched and the cycle repeats. Measured in
+production: two 15-minute windows of 181 and 156 sessions at `max_concurrent_agents: 4`, with 74
+rate-limit errors, 0 recorded completions, and 23-38 dispatches per 15 minutes for the same issues.
+
+Two REQUIRED mechanisms break the loop, and both compose with the bounded degraded-continue
+behavior above.
+
+**A. Instant-turn backoff (agent worker).** A completed turn whose wall-clock duration is below
+`agent.instant_turn_threshold_ms` is an instant turn.
+
+- The worker MUST sleep `agent.instant_turn_backoff_ms` before performing the turn-boundary tracker
+  refresh, so the refresh itself gets a chance to fall outside the throttled window.
+- `agent.max_consecutive_instant_turns` consecutive instant turns MUST end the run normally,
+  returning control to the orchestrator rather than grinding to `agent.max_turns`.
+- A non-instant turn resets the consecutive count.
+- The sleep MUST occur in the agent worker only. The orchestrator process MUST NOT block.
+
+On reaching the bound the worker MUST perform the turn-boundary read it would otherwise skip, and
+report what that read says:
+
+- terminal -> a confirmed ending;
+- active on a SUCCESSFUL read -> a confirmed *idle* ending (the tracker is healthy and the issue is
+  provably active; the model simply has nothing to do). It MUST NOT be reported as unconfirmed:
+  doing so would put legitimately active work behind the unconfirmed backoff and its escalation
+  ladder because its turns happened to be short;
+- read failed, degraded, or deferred -> an unconfirmed ending.
+
+**B. Unconfirmed-completion re-dispatch latch (orchestrator).** A run ending is *unconfirmed* when
+nothing proved the issue reached a terminal state: the boundary refresh failed or was
+rate-limited, the degraded-snapshot budget was exhausted, the instant-turn bound's confirming read
+failed, or `agent.max_turns` was reached on a stale snapshot. A Codex app-server transport failure
+(for example `:response_timeout` starting a follow-up turn) is NOT an unconfirmed ending: the
+tracker is not in doubt and the ordinary continuation retry re-reads the issue anyway.
+
+- The worker reports the ending's confirmation status to the orchestrator; an absent report means
+  confirmed.
+- An unconfirmed ending MUST NOT take the 1000 ms continuation path. The issue retains its claim
+  (so the poll loop skips it) and its next dispatch eligibility uses the escalating
+  `unconfirmed_completion` delay in 9.x above.
+- An unconfirmed ending is NOT an issue failure: it MUST NOT advance the circuit breaker. A retry
+  scheduled as a *failure* instead resets the consecutive unconfirmed count to zero.
+- `agent.max_unconfirmed_endings` consecutive unconfirmed endings MUST park the issue and file an
+  ops issue rather than re-dispatch it again. Without this the latch throttles the spin but never
+  ends it. The parked reconciliation unparks the issue once it reads terminal.
+- The latch is resolved by the tracker read the scheduled retry already performs: a terminal or
+  no-longer-visible issue releases the claim; an active issue whose state CHANGED since the ending
+  clears the escalation count; an active issue in the unchanged state dispatches while carrying the
+  count, so a repeat unconfirmed ending escalates instead of restarting at the base delay.
+- The retry pop deletes the retry entry while the claim is retained, so a dispatch that does not
+  START (dispatch-time revalidation error, stale skip, run lease held elsewhere, no worker
+  capacity) MUST re-arm the retry. Otherwise the issue is left claimed with no running entry, no
+  retry and no timer, and the dispatch loop - which skips claimed issues - never looks at it again.
 
 ### 11.5 Tracker Writes (Important Boundary)
 

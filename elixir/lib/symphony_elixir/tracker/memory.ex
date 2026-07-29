@@ -27,12 +27,21 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
-    wanted_ids = MapSet.new(issue_ids)
+    # Test affordance: the candidate poll and the dispatch-time revalidation are
+    # two SEPARATE tracker reads, and a throttled tracker can answer one and
+    # refuse the other. This lets a test reproduce that split.
+    case Application.get_env(:symphony_elixir, :memory_tracker_state_error) do
+      nil ->
+        wanted_ids = MapSet.new(issue_ids)
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
-       MapSet.member?(wanted_ids, id)
-     end)}
+        {:ok,
+         Enum.filter(issue_entries(), fn %Issue{id: id} ->
+           MapSet.member?(wanted_ids, id)
+         end)}
+
+      reason ->
+        {:error, reason}
+    end
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
