@@ -1165,7 +1165,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, retry_failures, unconfirmed_endings) do
     case AgentRunLease.acquire(issue, worker_host) do
       {:ok, lease} ->
-        start_leased_issue_on_worker_host(state, issue, attempt, recipient, worker_host, retry_failures, unconfirmed_endings, lease)
+        start_leased_issue_on_worker_host(
+          state,
+          issue,
+          attempt,
+          recipient,
+          worker_host,
+          retry_failures,
+          unconfirmed_endings,
+          lease
+        )
 
       :busy ->
         Logger.info("Skipping dispatch for #{issue_context(issue)} worker_host=#{worker_host || "local"}; another Symphony session holds the active run lease")
@@ -1744,6 +1753,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
+    case latch_delay(metadata) do
+      nil ->
+        if metadata[:delay_type] == :continuation and attempt == 1 do
+          @continuation_retry_delay_ms
+        else
+          failure_retry_delay(attempt)
+        end
+
+      delay ->
+        delay
+    end
+  end
+
+  # Latch-owned delays. The nil-delay_type branch keeps a live latch alive:
+  # reschedules built from a popped retry entry (a retry whose own tracker
+  # read failed, a dispatch that could not start) rebuild metadata from the
+  # persisted fields, which carry unconfirmed_endings but not delay_type;
+  # falling through to failure_retry_delay/1 would collapse a 5-minute
+  # latch to 20 seconds inside the very throttle window it exists for.
+  defp latch_delay(metadata) do
     cond do
       metadata[:delay_type] == :unconfirmed_completion ->
         unconfirmed_completion_delay(Map.get(metadata, :unconfirmed_endings, 1))
@@ -1751,20 +1780,11 @@ defmodule SymphonyElixir.Orchestrator do
       metadata[:delay_type] == :idle_backoff ->
         Config.settings!().agent.instant_turn_idle_backoff_ms
 
-      metadata[:delay_type] == :continuation and attempt == 1 ->
-        @continuation_retry_delay_ms
-
-      # A live latch that lost its delay_type still gets the latch delay.
-      # Reschedules built from a popped retry entry (a retry whose own tracker
-      # read failed, a dispatch that could not start) rebuild metadata from the
-      # persisted fields, which carry unconfirmed_endings but not delay_type;
-      # falling through to failure_retry_delay/1 would collapse a 5-minute
-      # latch to 20 seconds inside the very throttle window it exists for.
       is_nil(metadata[:delay_type]) and unconfirmed_endings(metadata) > 0 ->
         unconfirmed_completion_delay(unconfirmed_endings(metadata))
 
       true ->
-        failure_retry_delay(attempt)
+        nil
     end
   end
 
