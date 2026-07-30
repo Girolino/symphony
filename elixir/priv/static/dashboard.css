@@ -1,31 +1,31 @@
 :root {
-  color-scheme: light;
-  --canvas: #f6f8f6;
-  --sidebar: #e8ede8;
-  --surface: #ffffff;
-  --surface-muted: #eef2ee;
-  --surface-cool: #edf6f5;
-  --ink: #1d2420;
-  --ink-soft: #46524c;
-  --muted: #6a756f;
-  --line: rgba(29, 36, 32, 0.12);
-  --line-strong: rgba(29, 36, 32, 0.2);
-  --teal: #0b8177;
-  --teal-dark: #075b54;
-  --teal-soft: #dff1ef;
-  --blue: #2769a8;
-  --blue-soft: #e5eff8;
-  --amber: #9a650f;
-  --amber-soft: #fff0d1;
-  --red: #a43b31;
-  --red-soft: #fbe7e4;
-  --violet: #6b5a96;
-  --violet-soft: #eeeaf6;
-  --green: #267246;
-  --green-soft: #e1f2e8;
+  color-scheme: dark;
+  --canvas: #0f1012;
+  --sidebar: #15171a;
+  --surface: #1b1e21;
+  --surface-muted: #22262a;
+  --surface-cool: #192321;
+  --ink: #e8eae9;
+  --ink-soft: #b3bab6;
+  --muted: #848d88;
+  --line: rgba(232, 234, 233, 0.1);
+  --line-strong: rgba(232, 234, 233, 0.18);
+  --teal: #4fc9be;
+  --teal-dark: #7fd9d0;
+  --teal-soft: rgba(79, 201, 190, 0.14);
+  --blue: #6aa5dd;
+  --blue-soft: rgba(106, 165, 221, 0.14);
+  --amber: #d9a54a;
+  --amber-soft: rgba(217, 165, 74, 0.16);
+  --red: #e2685c;
+  --red-soft: rgba(226, 104, 92, 0.14);
+  --violet: #a290cf;
+  --violet-soft: rgba(162, 144, 207, 0.16);
+  --green: #58b380;
+  --green-soft: rgba(88, 179, 128, 0.14);
   --radius: 8px;
   --radius-small: 6px;
-  --shadow: 0 1px 2px rgba(29, 36, 32, 0.05), 0 12px 28px rgba(29, 36, 32, 0.07);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 28px rgba(0, 0, 0, 0.45);
 }
 
 * {
@@ -176,17 +176,17 @@ pre,
   align-items: center;
   border-radius: var(--radius-small);
   padding: 6px 8px;
-  color: #3f4d46;
+  color: var(--ink-soft);
   font-size: 0.9rem;
 }
 
 .nav-link.active {
-  background: rgba(11, 129, 119, 0.12);
+  background: rgba(79, 201, 190, 0.12);
   color: var(--teal-dark);
 }
 
 .nav-link:hover {
-  background: rgba(29, 36, 32, 0.05);
+  background: rgba(232, 234, 233, 0.06);
   color: var(--ink);
 }
 
@@ -240,7 +240,7 @@ pre,
 
 .status-badge-live {
   display: none;
-  border-color: rgba(11, 129, 119, 0.2);
+  border-color: rgba(79, 201, 190, 0.2);
   background: var(--teal-soft);
   color: var(--teal-dark);
 }
@@ -274,7 +274,7 @@ pre,
   justify-content: space-between;
   gap: 16px;
   border-bottom: 1px solid var(--line);
-  background: rgba(246, 248, 246, 0.94);
+  background: rgba(15, 16, 18, 0.92);
   padding: 14px 18px;
 }
 
@@ -471,16 +471,16 @@ pre,
 }
 
 .queue-row-running {
-  border-color: rgba(11, 129, 119, 0.26);
-  background: #fbfefd;
+  border-color: rgba(79, 201, 190, 0.26);
+  background: #1c2523;
 }
 
 .queue-row-blocked {
-  border-color: rgba(164, 59, 49, 0.24);
+  border-color: rgba(226, 104, 92, 0.24);
 }
 
 .queue-row-retry {
-  border-color: rgba(154, 101, 15, 0.26);
+  border-color: rgba(217, 165, 74, 0.26);
 }
 
 .queue-main,
@@ -587,25 +587,25 @@ pre,
 }
 
 .state-badge-active {
-  border-color: rgba(11, 129, 119, 0.2);
+  border-color: rgba(79, 201, 190, 0.2);
   background: var(--teal-soft);
   color: var(--teal-dark);
 }
 
 .state-badge-warning {
-  border-color: rgba(154, 101, 15, 0.24);
+  border-color: rgba(217, 165, 74, 0.24);
   background: var(--amber-soft);
   color: var(--amber);
 }
 
 .state-badge-danger {
-  border-color: rgba(164, 59, 49, 0.24);
+  border-color: rgba(226, 104, 92, 0.24);
   background: var(--red-soft);
   color: var(--red);
 }
 
 .state-badge-clean {
-  border-color: rgba(38, 114, 70, 0.22);
+  border-color: rgba(88, 179, 128, 0.22);
   background: var(--green-soft);
   color: var(--green);
 }
@@ -758,17 +758,17 @@ pre,
 }
 
 .ledger-item-good {
-  border-color: rgba(38, 114, 70, 0.22);
+  border-color: rgba(88, 179, 128, 0.22);
   background: var(--green-soft);
 }
 
 .ledger-item-warning {
-  border-color: rgba(154, 101, 15, 0.24);
+  border-color: rgba(217, 165, 74, 0.24);
   background: var(--amber-soft);
 }
 
 .ledger-item-danger {
-  border-color: rgba(164, 59, 49, 0.24);
+  border-color: rgba(226, 104, 92, 0.24);
   background: var(--red-soft);
 }
 
@@ -812,9 +812,9 @@ pre,
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: #f2f5f2;
+  background: var(--surface-muted);
   padding: 12px;
-  color: #2f3833;
+  color: var(--ink-soft);
   font-size: 0.88rem;
 }
 
@@ -828,7 +828,7 @@ pre,
 
 .error-panel {
   margin: 18px;
-  border-color: rgba(164, 59, 49, 0.24);
+  border-color: rgba(226, 104, 92, 0.24);
   background: var(--red-soft);
 }
 
