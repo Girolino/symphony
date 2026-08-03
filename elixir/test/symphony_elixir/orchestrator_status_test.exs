@@ -21,6 +21,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     def fetch_issue_states_by_ids(["issue-401"]), do: {:error, {:linear_api_status, 401}}
   end
 
+  defmodule TupleTransportFailureLinearClient do
+    def fetch_candidate_issues do
+      {:error, {:linear_api_request, %Req.TransportError{reason: {:bad_alpn_protocol, "h3"}}}}
+    end
+
+    def fetch_issues_by_states(_states), do: {:ok, []}
+    def fetch_issue_states_by_ids(_issue_ids), do: {:ok, []}
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1142,6 +1151,59 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     cached_snapshot = Orchestrator.snapshot(orchestrator_name, 50)
     assert cached_snapshot.health.status == "degraded"
     assert cached_snapshot.health.degraded_reason == "linear_api_status"
+    refute cached_snapshot.health.poll_busy
+  end
+
+  test "tuple-valued transport poll errors keep the orchestrator alive and degraded" do
+    previous_linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
+
+    on_exit(fn ->
+      if is_nil(previous_linear_client_module) do
+        Application.delete_env(:symphony_elixir, :linear_client_module)
+      else
+        Application.put_env(:symphony_elixir, :linear_client_module, previous_linear_client_module)
+      end
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_endpoint: "https://localhost/graphql",
+      poll_interval_ms: 30_000
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :linear_client_module,
+      TupleTransportFailureLinearClient
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :TupleTransportFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: false, last_error: %{transport: %{reason: reason}}}} ->
+            reason == ~s({:bad_alpn_protocol, "h3"})
+
+          _ ->
+            false
+        end,
+        2_000
+      )
+
+    assert Process.alive?(pid)
+    refute snapshot.polling.checking?
+    assert snapshot.polling.last_error.operation == "candidate_fetch"
+    assert snapshot.polling.last_error.transport.reason == ~s({:bad_alpn_protocol, "h3"})
+
+    cached_snapshot = Orchestrator.snapshot(orchestrator_name, 50)
+    assert cached_snapshot.health.status == "degraded"
+    assert cached_snapshot.health.degraded_reason == "linear_api_request"
     refute cached_snapshot.health.poll_busy
   end
 

@@ -82,6 +82,19 @@ defmodule SymphonyElixir.Linear.ClientTest do
     end
   end
 
+  test "transport diagnostics safely format tuple-valued Mint reasons" do
+    resolver = fn _host, _family -> {:ok, [{127, 0, 0, 1}]} end
+
+    diagnostics =
+      Client.transport_diagnostics_for_test(
+        {:linear_api_request, %Req.TransportError{reason: {:bad_alpn_protocol, "h3"}}},
+        "https://api.linear.app/graphql",
+        resolver
+      )
+
+    assert diagnostics.reason == ~s({:bad_alpn_protocol, "h3"})
+  end
+
   test "retries on a RATELIMITED 200 body and eventually succeeds" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

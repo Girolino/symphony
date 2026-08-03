@@ -922,7 +922,7 @@ defmodule SymphonyElixir.Linear.Client do
     with transport_reason when not is_nil(transport_reason) <- transport_error_reason(reason),
          %URI{host: host} when is_binary(host) <- URI.parse(endpoint) do
       %{
-        reason: to_string(transport_reason),
+        reason: format_transport_reason(transport_reason),
         host: host,
         request_mode: "ipv6_then_ipv4",
         ipv4: address_family_diagnostic(host, :inet, resolver),
@@ -937,6 +937,9 @@ defmodule SymphonyElixir.Linear.Client do
   defp transport_error_reason(%{__struct__: Req.TransportError, reason: reason}), do: reason
   defp transport_error_reason(%{__struct__: Mint.TransportError, reason: reason}), do: reason
   defp transport_error_reason(_reason), do: nil
+
+  defp format_transport_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_transport_reason(reason), do: inspect(reason)
 
   defp address_family_diagnostic(host, family, resolver) do
     case resolver.(String.to_charlist(host), family) do
