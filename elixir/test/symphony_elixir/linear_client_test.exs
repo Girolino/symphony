@@ -42,6 +42,46 @@ defmodule SymphonyElixir.Linear.ClientTest do
     :ok
   end
 
+  test "Linear requests enable Mint dual-stack fallback without adding a retry layer" do
+    assert [
+             retry: false,
+             inet6: true,
+             connect_options: [timeout: 30_000]
+           ] = Client.request_options_for_test()
+  end
+
+  test "transport diagnostics distinguish IPv4 and IPv6 resolver divergence" do
+    for unavailable_family <- [:inet, :inet6] do
+      resolver = fn _host, family ->
+        if family == unavailable_family,
+          do: {:error, :ehostunreach},
+          else: {:ok, [if(family == :inet, do: {127, 0, 0, 1}, else: {0, 0, 0, 0, 0, 0, 0, 1})]}
+      end
+
+      diagnostics =
+        Client.transport_diagnostics_for_test(
+          {:linear_api_request, %Req.TransportError{reason: :ehostunreach}},
+          "https://api.linear.app/graphql",
+          resolver
+        )
+
+      assert diagnostics.reason == "ehostunreach"
+      assert diagnostics.host == "api.linear.app"
+      assert diagnostics.request_mode == "ipv6_then_ipv4"
+
+      unavailable_key = if unavailable_family == :inet, do: :ipv4, else: :ipv6
+      available_key = if unavailable_family == :inet, do: :ipv6, else: :ipv4
+
+      assert diagnostics[unavailable_key] == %{
+               status: "unresolved",
+               address_count: 0,
+               error: ":ehostunreach"
+             }
+
+      assert diagnostics[available_key] == %{status: "resolved", address_count: 1}
+    end
+  end
+
   test "retries on a RATELIMITED 200 body and eventually succeeds" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

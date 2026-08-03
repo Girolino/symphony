@@ -2116,13 +2116,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp poll_error(operation, reason) do
-    %{
+    error = %{
       operation: to_string(operation),
       code: poll_error_code(reason),
       message: "Tracker poll failed; dispatch paused for this poll.",
       reason: inspect(reason),
       occurred_at: DateTime.utc_now()
     }
+
+    case Client.transport_diagnostics(reason) do
+      nil -> error
+      diagnostics -> Map.put(error, :transport, diagnostics)
+    end
   end
 
   defp poll_error_code(reason) when is_atom(reason), do: Atom.to_string(reason)

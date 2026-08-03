@@ -1137,6 +1137,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.blocked == []
     assert snapshot.polling.last_error.operation == "dispatch_revalidation"
     assert snapshot.polling.last_error.message =~ "dispatch paused for this poll"
+    refute snapshot.polling.checking?
+
+    cached_snapshot = Orchestrator.snapshot(orchestrator_name, 50)
+    assert cached_snapshot.health.status == "degraded"
+    assert cached_snapshot.health.degraded_reason == "linear_api_status"
+    refute cached_snapshot.health.poll_busy
   end
 
   test "orchestrator stores and releases a run lease for dispatched workers" do
