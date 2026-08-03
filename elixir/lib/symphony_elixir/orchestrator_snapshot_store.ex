@@ -19,7 +19,8 @@ defmodule SymphonyElixir.OrchestratorSnapshotStore do
           published_at: String.t(),
           orchestrator_alive: boolean(),
           message_queue_len: non_neg_integer() | nil,
-          poll_busy: boolean()
+          poll_busy: boolean(),
+          degraded_reason: String.t() | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -85,17 +86,22 @@ defmodule SymphonyElixir.OrchestratorSnapshotStore do
     alive? = Process.alive?(publisher)
     stale_after_ms = stale_after_ms(snapshot)
 
-    snapshot
-    |> refresh_running_runtime()
-    |> refresh_poll_countdown(age_ms)
-    |> Map.put(:health, %{
-      status: health_status(alive?, age_ms, stale_after_ms),
+    refreshed_snapshot =
+      snapshot
+      |> refresh_running_runtime()
+      |> refresh_poll_countdown(age_ms)
+
+    degraded_reason = degraded_reason(refreshed_snapshot)
+
+    Map.put(refreshed_snapshot, :health, %{
+      status: health_status(alive?, age_ms, stale_after_ms, degraded_reason),
       snapshot_age_ms: age_ms,
       stale_after_ms: stale_after_ms,
       published_at: published_at,
       orchestrator_alive: alive?,
       message_queue_len: message_queue_len(publisher, alive?),
-      poll_busy: get_in(snapshot, [:polling, :checking?]) == true
+      poll_busy: get_in(refreshed_snapshot, [:polling, :checking?]) == true,
+      degraded_reason: degraded_reason
     })
   end
 
@@ -141,9 +147,19 @@ defmodule SymphonyElixir.OrchestratorSnapshotStore do
     end
   end
 
-  defp health_status(false, _age_ms, _stale_after_ms), do: "unavailable"
-  defp health_status(true, age_ms, stale_after_ms) when age_ms > stale_after_ms, do: "stale"
-  defp health_status(true, _age_ms, _stale_after_ms), do: "healthy"
+  defp health_status(false, _age_ms, _stale_after_ms, _degraded_reason), do: "unavailable"
+  defp health_status(true, age_ms, stale_after_ms, _degraded_reason) when age_ms > stale_after_ms, do: "stale"
+  defp health_status(true, _age_ms, _stale_after_ms, degraded_reason) when is_binary(degraded_reason), do: "degraded"
+  defp health_status(true, _age_ms, _stale_after_ms, _degraded_reason), do: "healthy"
+
+  defp degraded_reason(snapshot) do
+    case get_in(snapshot, [:polling, :last_error]) do
+      %{code: code} when is_binary(code) -> code
+      %{"code" => code} when is_binary(code) -> code
+      error when not is_nil(error) -> "tracker_poll_error"
+      _ -> nil
+    end
+  end
 
   defp message_queue_len(_publisher, false), do: nil
 

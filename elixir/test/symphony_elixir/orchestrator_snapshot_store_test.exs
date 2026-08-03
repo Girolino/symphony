@@ -49,7 +49,8 @@ defmodule SymphonyElixir.OrchestratorSnapshotStoreTest do
           poll_check_in_progress: true,
           next_poll_due_at_ms: nil,
           tick_timer_ref: nil,
-          tick_token: make_ref()
+          tick_token: make_ref(),
+          last_poll_error: nil
       }
     end)
 
@@ -110,6 +111,31 @@ defmodule SymphonyElixir.OrchestratorSnapshotStoreTest do
     assert snapshot.health.status == "unavailable"
     refute snapshot.health.orchestrator_alive
     assert snapshot.health.message_queue_len == nil
+  end
+
+  test "a completed failed poll reports degraded health instead of ambiguous checking" do
+    snapshot_key = Module.concat(__MODULE__, :DegradedPoll)
+
+    :ok =
+      OrchestratorSnapshotStore.publish(snapshot_key, %{
+        running: [],
+        retrying: [],
+        blocked: [],
+        codex_totals: %{},
+        rate_limits: nil,
+        polling: %{
+          checking?: false,
+          next_poll_in_ms: 30_000,
+          poll_interval_ms: 30_000,
+          last_error: %{code: "linear_api_request", operation: "candidate_fetch"}
+        }
+      })
+
+    assert {:ok, snapshot} = OrchestratorSnapshotStore.fetch(snapshot_key)
+    assert snapshot.health.status == "degraded"
+    assert snapshot.health.degraded_reason == "linear_api_request"
+    refute snapshot.health.poll_busy
+    refute snapshot.polling.checking?
   end
 
   defp wait_for_cached_snapshot(orchestrator_name, running_count, attempts \\ 50)

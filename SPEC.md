@@ -1557,10 +1557,17 @@ Minimum endpoints:
         "stale_after_ms": 60000,
         "orchestrator_alive": true,
         "message_queue_len": 4,
-        "poll_busy": false
+        "poll_busy": false,
+        "degraded_reason": null
       }
     }
     ```
+
+  - `health.status` is `degraded` while the latest completed tracker poll has an
+    error, even when the orchestrator process and snapshot publisher remain
+    responsive. `health.degraded_reason` mirrors the poll error code. A completed
+    failed poll MUST report `polling.checking?` as false; the next successful poll
+    clears both the error and degraded health.
 
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information

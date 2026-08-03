@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
+  @graphql_connect_timeout_ms 30_000
 
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -406,6 +407,31 @@ defmodule SymphonyElixir.Linear.Client do
     do: reason in @retryable_transport_reasons
 
   def retryable_transport_error?(_reason), do: false
+
+  @doc """
+  Returns redacted address-family diagnostics for a Linear transport error.
+
+  The result intentionally reports only resolution status and address counts,
+  never resolved addresses or credentials. Non-transport errors return `nil`.
+  """
+  @spec transport_diagnostics(term()) :: map() | nil
+  def transport_diagnostics(reason) do
+    case transport_error_reason(reason) do
+      nil -> nil
+      _transport_reason -> build_transport_diagnostics(reason, Config.settings!().tracker.endpoint, &:inet.getaddrs/2)
+    end
+  end
+
+  @doc false
+  @spec transport_diagnostics_for_test(term(), String.t(), (term(), term() -> term())) :: map() | nil
+  def transport_diagnostics_for_test(reason, endpoint, resolver)
+      when is_binary(endpoint) and is_function(resolver, 2) do
+    build_transport_diagnostics(reason, endpoint, resolver)
+  end
+
+  @doc false
+  @spec request_options_for_test() :: keyword()
+  def request_options_for_test, do: graphql_request_options()
 
   @doc false
   @spec retry_after_ms(map()) :: pos_integer() | nil
@@ -869,12 +895,63 @@ defmodule SymphonyElixir.Linear.Client do
   # implicitly would make a future Req default silently multiply our attempts
   # against an API that is already throttling us.
   defp post_graphql_request(payload, headers) do
+    options = graphql_request_options()
+
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
-      retry: false,
-      connect_options: [timeout: 30_000]
+      retry: options[:retry],
+      inet6: options[:inet6],
+      connect_options: options[:connect_options]
     )
+  end
+
+  # Req defaults to IPv4-only. Enabling `inet6` delegates dual-stack behavior to
+  # Mint: IPv6 is attempted first and a failed IPv6 connection falls back to the
+  # default IPv4 path. This keeps either single-family routing failure from
+  # stranding tracker polling while preserving one bounded request/retry layer.
+  defp graphql_request_options do
+    [
+      retry: false,
+      inet6: true,
+      connect_options: [timeout: @graphql_connect_timeout_ms]
+    ]
+  end
+
+  defp build_transport_diagnostics(reason, endpoint, resolver) do
+    with transport_reason when not is_nil(transport_reason) <- transport_error_reason(reason),
+         %URI{host: host} when is_binary(host) <- URI.parse(endpoint) do
+      %{
+        reason: format_transport_reason(transport_reason),
+        host: host,
+        request_mode: "ipv6_then_ipv4",
+        ipv4: address_family_diagnostic(host, :inet, resolver),
+        ipv6: address_family_diagnostic(host, :inet6, resolver)
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp transport_error_reason({:linear_api_request, reason}), do: transport_error_reason(reason)
+  defp transport_error_reason(%{__struct__: Req.TransportError, reason: reason}), do: reason
+  defp transport_error_reason(%{__struct__: Mint.TransportError, reason: reason}), do: reason
+  defp transport_error_reason(_reason), do: nil
+
+  defp format_transport_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_transport_reason(reason), do: inspect(reason)
+
+  defp address_family_diagnostic(host, family, resolver) do
+    case resolver.(String.to_charlist(host), family) do
+      {:ok, addresses} when is_list(addresses) and addresses != [] ->
+        %{status: "resolved", address_count: length(addresses)}
+
+      {:ok, []} ->
+        %{status: "unresolved", address_count: 0, error: "no_addresses"}
+
+      {:error, reason} ->
+        %{status: "unresolved", address_count: 0, error: inspect(reason)}
+    end
   end
 
   defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
