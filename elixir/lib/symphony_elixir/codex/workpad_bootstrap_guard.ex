@@ -39,9 +39,22 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     }
   }
   """
+  @cached_workpad_comment_query """
+  query SymphonyCachedWorkpadComment($id: String!) {
+    comment(id: $id) {
+      id
+      body
+      resolvedAt
+      createdAt
+      updatedAt
+      url
+    }
+  }
+  """
 
   @lock_timeout_ms 30_000
   @lock_stale_ms 60_000
+  @recent_workpad_cache_ttl_ms 300_000
   @retry_sleep_ms 50
   @workpad_marker "## Codex Workpad"
 
@@ -65,19 +78,32 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp create_or_reuse_workpad(query, variables, linear_client, issue_id) do
-    case fetch_active_workpads(linear_client, issue_id) do
-      {:ok, []} ->
-        create_workpad(query, variables, linear_client, issue_id)
+    with {:ok, comments} <- fetch_workpad_comments(linear_client, issue_id) do
+      create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id)
+    end
+  end
 
-      {:ok, comments} ->
-        canonical = newest_comment(comments)
+  defp create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id) do
+    case Enum.filter(comments, &active_workpad_comment?/1) do
+      [] -> reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id)
+      active_comments -> reuse_active_workpad(linear_client, issue_id, active_comments)
+    end
+  end
 
-        with {:ok, resolved_ids} <- resolve_duplicate_workpads(linear_client, comments, canonical) do
-          {:ok, reuse_response(canonical, resolved_ids)}
-        end
+  defp reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id) do
+    case read_recent_workpad_cache(issue_id, comments, linear_client) do
+      {:ok, comment} -> {:ok, reuse_response(comment, [])}
+      {:error, reason} -> {:error, reason}
+      :miss -> create_workpad(query, variables, linear_client, issue_id)
+    end
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  defp reuse_active_workpad(linear_client, issue_id, active_comments) do
+    canonical = newest_comment(active_comments)
+
+    with {:ok, resolved_ids} <- resolve_duplicate_workpads(linear_client, active_comments, canonical) do
+      write_recent_workpad_cache(issue_id, canonical)
+      {:ok, reuse_response(canonical, resolved_ids)}
     end
   end
 
@@ -94,25 +120,45 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp maybe_attach_active_workpad(response, linear_client, issue_id) do
-    case fetch_active_workpads(linear_client, issue_id) do
-      {:ok, comments} when comments != [] ->
-        canonical = newest_comment(comments)
+    case fetch_workpad_comments(linear_client, issue_id) do
+      {:ok, comments} ->
+        maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments)
 
-        case resolve_duplicate_workpads(linear_client, comments, canonical) do
-          {:ok, resolved_ids} -> put_comment_create(response, canonical, false, resolved_ids)
-          {:error, _reason} -> response
-        end
+      other ->
+        Logger.warning(
+          "Skipping workpad reconciliation after post-create lookup failure " <>
+            "issue_id=#{issue_id} reason=#{inspect(other)}"
+        )
 
-      _ ->
+        cache_created_workpad_from_response(response, issue_id)
+    end
+  end
+
+  defp maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments) do
+    case Enum.filter(comments, &active_workpad_comment?/1) do
+      [] -> cache_created_workpad_from_response(response, issue_id)
+      active_comments -> attach_active_workpad(response, linear_client, issue_id, active_comments)
+    end
+  end
+
+  defp attach_active_workpad(response, linear_client, issue_id, active_comments) do
+    canonical = newest_comment(active_comments)
+
+    case resolve_duplicate_workpads(linear_client, active_comments, canonical) do
+      {:ok, resolved_ids} ->
+        write_recent_workpad_cache(issue_id, canonical)
+        put_comment_create(response, canonical, false, resolved_ids)
+
+      {:error, _reason} ->
         response
     end
   end
 
-  defp fetch_active_workpads(linear_client, issue_id) do
+  defp fetch_workpad_comments(linear_client, issue_id) do
     with {:ok, response} <- linear_client.(@active_workpad_query, %{"issueId" => issue_id}, []) do
       response
       |> comment_nodes()
-      |> Enum.filter(&active_workpad_comment?/1)
+      |> Enum.filter(&workpad_comment?/1)
       |> then(&{:ok, &1})
     end
   end
@@ -135,11 +181,15 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp workpad_body?(_body), do: false
 
+  defp workpad_comment?(%{} = comment) do
+    workpad_body?(map_get(comment, "body"))
+  end
+
+  defp workpad_comment?(_comment), do: false
+
   defp active_workpad_comment?(%{} = comment) do
     workpad_body?(map_get(comment, "body")) and is_nil(map_get(comment, "resolvedAt"))
   end
-
-  defp active_workpad_comment?(_comment), do: false
 
   defp newest_comment(comments) do
     Enum.max_by(comments, &comment_sort_key/1)
@@ -205,6 +255,17 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     |> map_get("success") == true
   end
 
+  defp comment_create_comment(response) do
+    response
+    |> map_get("data")
+    |> map_get("commentCreate")
+    |> map_get("comment")
+    |> case do
+      %{} = comment -> comment
+      _ -> nil
+    end
+  end
+
   defp reuse_response(comment, resolved_ids) do
     %{
       "data" => %{
@@ -231,6 +292,17 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
     response
     |> Map.put("data", Map.put(data, "commentCreate", updated_comment_create))
+  end
+
+  defp cache_created_workpad_from_response(response, issue_id) do
+    case comment_create_comment(response) do
+      %{} = comment ->
+        write_recent_workpad_cache(issue_id, comment)
+        put_comment_create(response, comment, false, [])
+
+      nil ->
+        response
+    end
   end
 
   defp with_issue_lock(issue_id, fun) do
@@ -389,6 +461,143 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     |> Path.expand()
     |> Path.join(".symphony-workpad-bootstrap-locks")
     |> Path.join(safe_key(issue_id))
+  end
+
+  defp recent_workpad_cache_path(issue_id) do
+    Config.settings!().workspace.root
+    |> Path.expand()
+    |> Path.join(".symphony-workpad-bootstrap-cache")
+    |> Path.join("#{safe_key(issue_id)}.json")
+  end
+
+  defp read_recent_workpad_cache(issue_id, visible_comments, linear_client) do
+    cache_path = recent_workpad_cache_path(issue_id)
+
+    with {:ok, body} <- File.read(cache_path),
+         {:ok, cache} <- Jason.decode(body),
+         true <- recent_workpad_cache_fresh?(cache),
+         %{} = comment <- map_get(cache, "comment"),
+         true <- cached_workpad_comment_shape?(comment) do
+      validate_recent_workpad_cache(cache_path, issue_id, comment, visible_comments, linear_client)
+    else
+      {:error, :enoent} ->
+        :miss
+
+      {:error, %Jason.DecodeError{}} ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+
+      {:error, _reason} ->
+        :miss
+
+      false ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+
+      _ ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+    end
+  rescue
+    _error in [ArgumentError, File.Error] -> :miss
+  end
+
+  defp validate_recent_workpad_cache(cache_path, issue_id, comment, visible_comments, linear_client) do
+    comment_id = map_get(comment, "id")
+
+    case Enum.find(visible_comments, &(map_get(&1, "id") == comment_id)) do
+      %{} ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+
+      nil ->
+        verify_cached_workpad_comment(cache_path, issue_id, comment_id, linear_client)
+    end
+  end
+
+  defp verify_cached_workpad_comment(cache_path, issue_id, comment_id, linear_client) do
+    case fetch_workpad_comment(linear_client, comment_id) do
+      {:ok, %{} = comment} ->
+        if active_workpad_comment?(comment) do
+          {:ok, comment}
+        else
+          remove_recent_workpad_cache(cache_path)
+          :miss
+        end
+
+      {:ok, nil} ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+
+      {:error, reason} ->
+        Logger.warning(
+          "Failing closed after cached workpad lookup failure " <>
+            "issue_id=#{issue_id} comment_id=#{comment_id} reason=#{inspect(reason)}"
+        )
+
+        {:error, {:cached_workpad_comment_lookup_failed, comment_id, reason}}
+    end
+  end
+
+  defp fetch_workpad_comment(linear_client, comment_id) when is_binary(comment_id) do
+    with {:ok, response} <- linear_client.(@cached_workpad_comment_query, %{"id" => comment_id}, []) do
+      {:ok, response |> map_get("data") |> map_get("comment")}
+    end
+  end
+
+  defp write_recent_workpad_cache(issue_id, comment) when is_map(comment) do
+    payload_comment = recent_workpad_cache_comment(comment)
+
+    if cached_workpad_comment_shape?(payload_comment) do
+      cache_path = recent_workpad_cache_path(issue_id)
+
+      payload = %{
+        comment: payload_comment,
+        issue_id: issue_id,
+        cached_unix_ms: System.system_time(:millisecond)
+      }
+
+      with :ok <- File.mkdir_p(Path.dirname(cache_path)),
+           {:ok, encoded} <- Jason.encode(payload),
+           :ok <- File.write(cache_path, encoded) do
+        :ok
+      else
+        _ -> :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    _error in [ArgumentError, File.Error, Jason.EncodeError] -> :ok
+  end
+
+  defp recent_workpad_cache_fresh?(cache) do
+    case map_get(cache, "cached_unix_ms") do
+      cached_unix_ms when is_integer(cached_unix_ms) ->
+        System.system_time(:millisecond) - cached_unix_ms <= @recent_workpad_cache_ttl_ms
+
+      _ ->
+        false
+    end
+  end
+
+  defp cached_workpad_comment_shape?(comment) do
+    is_map(comment) and is_binary(map_get(comment, "id")) and workpad_body?(map_get(comment, "body"))
+  end
+
+  defp recent_workpad_cache_comment(comment) do
+    ["id", "body", "resolvedAt", "createdAt", "updatedAt", "url"]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case map_get(comment, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp remove_recent_workpad_cache(cache_path) do
+    _ = File.rm(cache_path)
+    :ok
   end
 
   defp safe_key(value) when is_binary(value) do

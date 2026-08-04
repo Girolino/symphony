@@ -3,6 +3,16 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
+  setup do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-dynamic-tool-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    {:ok, workspace_root: workspace_root}
+  end
+
   test "tool_specs advertises the linear_graphql input contract" do
     assert [
              %{
@@ -100,14 +110,19 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
-  test "default linear_graphql client allows live e2e opt-in through loopback" do
+  test "default linear_graphql client allows live e2e opt-in through loopback", %{workspace_root: workspace_root} do
     previous_live_e2e_flag = System.get_env("SYMPHONY_RUN_LIVE_E2E")
 
     on_exit(fn ->
       restore_env("SYMPHONY_RUN_LIVE_E2E", previous_live_e2e_flag)
     end)
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_endpoint: "http://127.0.0.1:1/graphql")
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_endpoint: "http://127.0.0.1:1/graphql",
+      workspace_root: workspace_root
+    )
+
     System.put_env("SYMPHONY_RUN_LIVE_E2E", "1")
 
     response =
@@ -258,6 +273,481 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert count_workpad_calls(table, :comment_update) == 2
     assert count_workpad_calls(table, :comment_lookup) >= 4
     assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates converge when Linear hides newly created comments" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-hidden-create-#{System.unique_integer([:positive])}"
+      )
+
+    table = :ets.new(:workpad_bootstrap_guard_hidden_create, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    client = stale_comment_lookup_workpad_linear_client(table)
+    lookup_args = workpad_lookup_args()
+
+    assert lookup_args
+           |> execute_with_client(client)
+           |> output()
+           |> get_in(["data", "issue", "comments", "nodes"]) == []
+
+    assert lookup_args
+           |> execute_with_client(client)
+           |> output()
+           |> get_in(["data", "issue", "comments", "nodes"]) == []
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          "## Codex Workpad\n\ncreated while hidden #{index}"
+          |> workpad_create_args()
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates converge after two kickoff sessions both start empty" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-two-session-kickoff-#{System.unique_integer([:positive])}"
+      )
+
+    table = :ets.new(:workpad_bootstrap_guard_two_session_kickoff, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    insert_workpad_comment(table, "resolved-workpad", %{
+      "body" => "## Codex Workpad\n\nresolved history",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z",
+      "resolvedAt" => "2026-08-04T12:01:00Z"
+    })
+
+    client = delayed_visibility_workpad_linear_client(table)
+
+    assert active_workpad_ids(table) == []
+
+    tasks =
+      for index <- 1..2 do
+        Task.async(fn ->
+          workpad_create_args("## Codex Workpad\n\nkickoff session #{index}")
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert count_workpad_calls(table, :comment_resolve) == 0
+    assert active_workpad_ids(table) == ["workpad-1"]
+
+    assert table
+           |> lookup_workpad_comment("resolved-workpad")
+           |> Map.fetch!("resolvedAt")
+  end
+
+  test "linear_graphql cached workpad creates ignore directly resolved history" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-resolved-cache-#{System.unique_integer([:positive])}"
+      )
+
+    table = :ets.new(:workpad_bootstrap_guard_resolved_cache, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    client = stale_comment_lookup_workpad_linear_client(table)
+
+    first =
+      "## Codex Workpad\n\nfirst cached"
+      |> workpad_create_args()
+      |> execute_with_client(client)
+      |> output()
+
+    assert get_in(first, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert {:ok, _response} = handle_workpad_resolve(table, %{"id" => "workpad-1"})
+
+    second =
+      "## Codex Workpad\n\nreplacement"
+      |> workpad_create_args()
+      |> execute_with_client(client)
+      |> output()
+
+    assert get_in(second, ["data", "commentCreate", "comment", "id"]) == "workpad-2"
+    assert count_workpad_calls(table, :comment_create) == 2
+    assert active_workpad_ids(table) == ["workpad-2"]
+  end
+
+  test "linear_graphql cached workpad creates ignore visibly resolved cache entries" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-visible-resolved-cache-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-visible-resolved-cache"
+    table = :ets.new(:workpad_bootstrap_guard_visible_resolved_cache, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    insert_workpad_comment(table, "cached-workpad", %{
+      "body" => "## Codex Workpad\n\nresolved cached",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z",
+      "resolvedAt" => "2026-08-04T12:01:00Z"
+    })
+
+    write_recent_workpad_cache!(workspace_root, issue_id, %{
+      "id" => "cached-workpad",
+      "body" => "## Codex Workpad\n\nresolved cached",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z"
+    })
+
+    create =
+      "## Codex Workpad\n\nreplacement for visible resolved cache"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad create caches response when post-create lookup fails" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-post-create-lookup-failure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-post-create-lookup-failure"
+    table = :ets.new(:workpad_bootstrap_guard_post_create_lookup_failure, [:public])
+    lookup_counter = :counters.new(1, [])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    client = fn query, variables, opts ->
+      cond do
+        String.contains?(query, "comments") ->
+          :counters.add(lookup_counter, 1, 1)
+
+          case :counters.get(lookup_counter, 1) do
+            1 -> {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+            _sequence -> {:error, :post_create_lookup_failed}
+          end
+
+        String.contains?(query, "commentCreate") ->
+          handle_workpad_create(table, variables)
+
+        true ->
+          workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+
+    create =
+      "## Codex Workpad\n\ncreated despite post-create lookup failure"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(client)
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert get_in(create, ["data", "commentCreate", "reusedExistingWorkpad"]) == false
+    assert File.exists?(workpad_cache_path(workspace_root, issue_id))
+  end
+
+  test "linear_graphql workpad creates ignore stale recent cache files" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-stale-cache-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-stale-cache"
+    table = :ets.new(:workpad_bootstrap_guard_stale_cache, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    write_recent_workpad_cache!(
+      workspace_root,
+      issue_id,
+      %{
+        "id" => "cached-workpad",
+        "body" => "## Codex Workpad\n\nstale cached",
+        "createdAt" => "2026-08-04T12:00:00Z",
+        "updatedAt" => "2026-08-04T12:00:00Z"
+      },
+      cached_unix_ms: 0
+    )
+
+    create =
+      "## Codex Workpad\n\nfresh after stale cache"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates ignore missing cached comments after empty list reads" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-missing-cache-comment-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-missing-cache-comment"
+    table = :ets.new(:workpad_bootstrap_guard_missing_cache_comment, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    write_recent_workpad_cache!(workspace_root, issue_id, %{
+      "id" => "missing-cached-workpad",
+      "body" => "## Codex Workpad\n\nmissing cached",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z"
+    })
+
+    create =
+      "## Codex Workpad\n\nfresh after missing cached comment"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates ignore visible resolved cache entries" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-visible-resolved-cache-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    resolved_table = :ets.new(:workpad_bootstrap_guard_unusable_resolved_cache, [:public])
+
+    insert_workpad_comment(resolved_table, "resolved-cached-workpad", %{
+      "body" => "## Codex Workpad\n\nresolved cached",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z",
+      "resolvedAt" => "2026-08-04T12:01:00Z"
+    })
+
+    write_recent_workpad_cache!(workspace_root, "issue-visible-resolved-cache", %{
+      "id" => "resolved-cached-workpad",
+      "body" => "## Codex Workpad\n\nresolved cached",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z"
+    })
+
+    visible_resolved =
+      "## Codex Workpad\n\nfresh after visible resolved cache"
+      |> workpad_create_args("issue-visible-resolved-cache")
+      |> execute_with_client(workpad_linear_client(resolved_table))
+      |> output()
+
+    assert get_in(visible_resolved, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(resolved_table, :comment_create) == 1
+  end
+
+  test "linear_graphql workpad creates drop malformed cache timestamps" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-malformed-cache-timestamp-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    malformed_table = :ets.new(:workpad_bootstrap_guard_malformed_cache_timestamp, [:public])
+
+    write_recent_workpad_cache!(
+      workspace_root,
+      "issue-malformed-cache-timestamp",
+      %{
+        "id" => "cached-workpad",
+        "body" => "## Codex Workpad\n\nmalformed timestamp",
+        "createdAt" => "2026-08-04T12:00:00Z",
+        "updatedAt" => "2026-08-04T12:00:00Z"
+      },
+      cached_unix_ms: nil
+    )
+
+    malformed_timestamp =
+      "## Codex Workpad\n\nfresh after malformed timestamp"
+      |> workpad_create_args("issue-malformed-cache-timestamp")
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(malformed_table))
+      |> output()
+
+    assert get_in(malformed_timestamp, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(malformed_table, :comment_create) == 1
+  end
+
+  test "linear_graphql workpad creates drop invalid recent cache JSON" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-invalid-cache-json-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-invalid-cache-json"
+    table = :ets.new(:workpad_bootstrap_guard_invalid_cache_json, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    cache_path = workpad_cache_path(workspace_root, issue_id)
+    File.mkdir_p!(Path.dirname(cache_path))
+    File.write!(cache_path, "{invalid-json")
+
+    create =
+      "## Codex Workpad\n\nfresh after invalid cache json"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates drop malformed recent cache payloads" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-malformed-cache-payload-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-malformed-cache-payload"
+    table = :ets.new(:workpad_bootstrap_guard_malformed_cache_payload, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    cache_path = workpad_cache_path(workspace_root, issue_id)
+    File.mkdir_p!(Path.dirname(cache_path))
+
+    File.write!(
+      cache_path,
+      Jason.encode!(%{
+        comment: nil,
+        issue_id: issue_id,
+        cached_unix_ms: System.system_time(:millisecond)
+      })
+    )
+
+    create =
+      "## Codex Workpad\n\nfresh after malformed cache payload"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates fail closed after cached-comment lookup errors" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-cached-comment-error-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    error_table = :ets.new(:workpad_bootstrap_guard_cached_comment_error, [:public])
+
+    write_recent_workpad_cache!(workspace_root, "issue-cached-comment-error", %{
+      "id" => "cached-workpad",
+      "body" => "## Codex Workpad\n\ncomment error",
+      "createdAt" => "2026-08-04T12:00:00Z",
+      "updatedAt" => "2026-08-04T12:00:00Z"
+    })
+
+    lookup_error =
+      "## Codex Workpad\n\nfresh after lookup error"
+      |> workpad_create_args("issue-cached-comment-error")
+      |> execute_with_client(cached_comment_error_workpad_linear_client(error_table))
+
+    assert lookup_error["success"] == false
+
+    assert get_in(Jason.decode!(lookup_error["output"]), ["error", "reason"]) ==
+             "{:cached_workpad_comment_lookup_failed, \"cached-workpad\", :cached_comment_lookup_failed}"
+
+    assert count_workpad_calls(error_table, :comment_create) == 0
+    assert File.exists?(workpad_cache_path(workspace_root, "issue-cached-comment-error"))
   end
 
   test "linear_graphql workpad creates guard aliased input object variables" do
@@ -1150,6 +1640,9 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         String.contains?(query, "commentResolve") ->
           handle_workpad_resolve(table, variables)
 
+        String.contains?(query, "comment(id:") ->
+          handle_workpad_comment_lookup(table, variables)
+
         String.contains?(query, "comments") ->
           record_workpad_call(table, :comment_lookup, variables)
           {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => workpad_comments(table)}}}}}
@@ -1158,6 +1651,11 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
           {:ok, %{"data" => %{}}}
       end
     end
+  end
+
+  defp handle_workpad_comment_lookup(table, variables) do
+    record_workpad_call(table, :comment_lookup, variables)
+    {:ok, %{"data" => %{"comment" => lookup_workpad_comment(table, Map.get(variables, "id"))}}}
   end
 
   defp inline_workpad_linear_client(table) do
@@ -1173,6 +1671,33 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         handle_workpad_create(table, inline_variables)
       else
         workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+  end
+
+  defp stale_comment_lookup_workpad_linear_client(table) do
+    fn query, variables, opts ->
+      if String.contains?(query, "comments") do
+        record_workpad_call(table, :comment_lookup, variables)
+        {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+      else
+        workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+  end
+
+  defp cached_comment_error_workpad_linear_client(table) do
+    fn query, variables, opts ->
+      cond do
+        String.contains?(query, "comment(id:") ->
+          {:error, :cached_comment_lookup_failed}
+
+        String.contains?(query, "comments") ->
+          record_workpad_call(table, :comment_lookup, variables)
+          {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+
+        true ->
+          workpad_linear_client(table).(query, variables, opts)
       end
     end
   end
@@ -1193,6 +1718,33 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         workpad_linear_client(table).(query, variables, opts)
       end
     end
+  end
+
+  defp delayed_visibility_workpad_linear_client(table) do
+    fn query, variables, opts ->
+      delayed_visibility_workpad_response(table, query, variables, opts)
+    end
+  end
+
+  defp delayed_visibility_workpad_response(table, query, variables, opts) do
+    cond do
+      String.contains?(query, "commentCreate") -> handle_delayed_visibility_workpad_create(table, variables)
+      String.contains?(query, "comments") -> handle_delayed_visibility_workpad_lookup(table, variables)
+      true -> workpad_linear_client(table).(query, variables, opts)
+    end
+  end
+
+  defp handle_delayed_visibility_workpad_create(table, variables) do
+    with {:ok, response} <- handle_workpad_create(table, variables) do
+      id = get_in(response, ["data", "commentCreate", "comment", "id"])
+      :ets.insert(table, {{:created_by, self()}, id})
+      {:ok, response}
+    end
+  end
+
+  defp handle_delayed_visibility_workpad_lookup(table, variables) do
+    record_workpad_call(table, :comment_lookup, variables)
+    {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => visible_workpad_comments(table)}}}}}
   end
 
   defp handle_workpad_create(table, variables) do
@@ -1268,6 +1820,31 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     |> Enum.sort_by(& &1["id"])
   end
 
+  defp visible_workpad_comments(table) do
+    case :ets.lookup(table, {:created_by, self()}) do
+      [] ->
+        historical_workpad_comments(table)
+
+      [{_key, created_id}] ->
+        sequence = :ets.update_counter(table, {:post_create_lookup, self()}, {2, 1}, {{:post_create_lookup, self()}, 0})
+
+        if sequence == 1 do
+          table
+          |> historical_workpad_comments()
+          |> Kernel.++([lookup_workpad_comment(table, created_id)])
+          |> Enum.reject(&is_nil/1)
+        else
+          workpad_comments(table)
+        end
+    end
+  end
+
+  defp historical_workpad_comments(table) do
+    table
+    |> workpad_comments()
+    |> Enum.filter(&Map.get(&1, "resolvedAt"))
+  end
+
   defp active_workpad_ids(table) do
     table
     |> workpad_comments()
@@ -1305,6 +1882,27 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       ".symphony-workpad-bootstrap-locks",
       issue_id
     ])
+  end
+
+  defp workpad_cache_path(workspace_root, issue_id) do
+    Path.join([
+      Path.expand(workspace_root),
+      ".symphony-workpad-bootstrap-cache",
+      String.replace(issue_id, ~r/[^a-zA-Z0-9_-]/, "_") <> ".json"
+    ])
+  end
+
+  defp write_recent_workpad_cache!(workspace_root, issue_id, comment, opts \\ []) do
+    cache_path = workpad_cache_path(workspace_root, issue_id)
+    File.mkdir_p!(Path.dirname(cache_path))
+
+    payload = %{
+      comment: comment,
+      issue_id: issue_id,
+      cached_unix_ms: Keyword.get(opts, :cached_unix_ms, System.system_time(:millisecond))
+    }
+
+    File.write!(cache_path, Jason.encode!(payload))
   end
 
   defp map_get_input(map, key) do
