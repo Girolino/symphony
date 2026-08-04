@@ -873,6 +873,26 @@ Workspace persistence:
 - Workspaces are reused across runs for the same issue.
 - Successful runs do not auto-delete workspaces.
 
+### 9.1.1 Workpad Bootstrap Guard Artifacts
+
+When the Linear dynamic tool handles a `## Codex Workpad` bootstrap create, implementations MAY
+create coordination artifacts under the normalized workspace root:
+
+- `<workspace.root>/.symphony-workpad-bootstrap-locks/<safe_issue_id>` for the per-issue create lock.
+- `<workspace.root>/.symphony-workpad-bootstrap-cache/<safe_issue_id>.json` for the most recently
+  confirmed workpad comment.
+
+`safe_issue_id` replaces characters outside `[A-Za-z0-9_-]` with `_`.
+
+The workpad bootstrap cache is a temporary convergence aid for stale tracker comment reads. A cache
+entry is reusable for at most five minutes and only after a direct tracker lookup confirms that the
+cached comment still exists, is unresolved, and starts with `## Codex Workpad`. Missing, resolved,
+stale, or malformed cache entries MUST NOT resurrect historical workpads.
+
+When a create request converges on an existing active workpad, the dynamic tool response keeps the
+normal `commentCreate` shape, returns the canonical comment, sets `reusedExistingWorkpad=true`, and
+reports any resolved duplicate workpads in `resolvedDuplicateIds`.
+
 ### 9.2 Workspace Creation and Reuse
 
 Input: `issue.identifier`

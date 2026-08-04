@@ -120,8 +120,16 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp maybe_attach_active_workpad(response, linear_client, issue_id) do
     case fetch_workpad_comments(linear_client, issue_id) do
-      {:ok, comments} -> maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments)
-      _ -> cache_created_workpad_from_response(response, issue_id)
+      {:ok, comments} ->
+        maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments)
+
+      other ->
+        Logger.warning(
+          "Skipping workpad reconciliation after post-create lookup failure " <>
+            "issue_id=#{issue_id} reason=#{inspect(other)}"
+        )
+
+        cache_created_workpad_from_response(response, issue_id)
     end
   end
 
@@ -471,15 +479,26 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
          true <- cached_workpad_comment_shape?(comment) do
       validate_recent_workpad_cache(cache_path, comment, visible_comments, linear_client)
     else
+      {:error, :enoent} ->
+        :miss
+
+      {:error, %Jason.DecodeError{}} ->
+        remove_recent_workpad_cache(cache_path)
+        :miss
+
+      {:error, _reason} ->
+        :miss
+
       false ->
         remove_recent_workpad_cache(cache_path)
         :miss
 
       _ ->
+        remove_recent_workpad_cache(cache_path)
         :miss
     end
   rescue
-    _error in [ArgumentError, File.Error, Jason.DecodeError] -> :miss
+    _error in [ArgumentError, File.Error] -> :miss
   end
 
   defp validate_recent_workpad_cache(cache_path, comment, visible_comments, linear_client) do

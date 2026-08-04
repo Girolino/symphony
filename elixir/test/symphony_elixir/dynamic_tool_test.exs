@@ -4,8 +4,13 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   alias SymphonyElixir.Codex.DynamicTool
 
   setup do
-    File.rm_rf(Path.join([System.tmp_dir!(), "symphony_workspaces", ".symphony-workpad-bootstrap-cache"]))
-    :ok
+    workspace_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-dynamic-tool-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    {:ok, workspace_root: workspace_root}
   end
 
   test "tool_specs advertises the linear_graphql input contract" do
@@ -105,14 +110,19 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
-  test "default linear_graphql client allows live e2e opt-in through loopback" do
+  test "default linear_graphql client allows live e2e opt-in through loopback", %{workspace_root: workspace_root} do
     previous_live_e2e_flag = System.get_env("SYMPHONY_RUN_LIVE_E2E")
 
     on_exit(fn ->
       restore_env("SYMPHONY_RUN_LIVE_E2E", previous_live_e2e_flag)
     end)
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_endpoint: "http://127.0.0.1:1/graphql")
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_endpoint: "http://127.0.0.1:1/graphql",
+      workspace_root: workspace_root
+    )
+
     System.put_env("SYMPHONY_RUN_LIVE_E2E", "1")
 
     response =
@@ -558,11 +568,11 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
-  test "linear_graphql workpad creates drop unusable recent cache entries" do
+  test "linear_graphql workpad creates ignore visible resolved cache entries" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
-        "symphony-elixir-workpad-unusable-cache-#{System.unique_integer([:positive])}"
+        "symphony-elixir-workpad-visible-resolved-cache-#{System.unique_integer([:positive])}"
       )
 
     on_exit(fn ->
@@ -571,7 +581,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-    resolved_table = :ets.new(:workpad_bootstrap_guard_visible_resolved_cache, [:public])
+    resolved_table = :ets.new(:workpad_bootstrap_guard_unusable_resolved_cache, [:public])
 
     insert_workpad_comment(resolved_table, "resolved-cached-workpad", %{
       "body" => "## Codex Workpad\n\nresolved cached",
@@ -594,6 +604,21 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       |> output()
 
     assert get_in(visible_resolved, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(resolved_table, :comment_create) == 1
+  end
+
+  test "linear_graphql workpad creates drop malformed cache timestamps" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-malformed-cache-timestamp-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
     malformed_table = :ets.new(:workpad_bootstrap_guard_malformed_cache_timestamp, [:public])
 
@@ -616,6 +641,91 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       |> output()
 
     assert get_in(malformed_timestamp, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(malformed_table, :comment_create) == 1
+  end
+
+  test "linear_graphql workpad creates drop invalid recent cache JSON" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-invalid-cache-json-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-invalid-cache-json"
+    table = :ets.new(:workpad_bootstrap_guard_invalid_cache_json, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    cache_path = workpad_cache_path(workspace_root, issue_id)
+    File.mkdir_p!(Path.dirname(cache_path))
+    File.write!(cache_path, "{invalid-json")
+
+    create =
+      "## Codex Workpad\n\nfresh after invalid cache json"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates drop malformed recent cache payloads" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-malformed-cache-payload-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-malformed-cache-payload"
+    table = :ets.new(:workpad_bootstrap_guard_malformed_cache_payload, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    cache_path = workpad_cache_path(workspace_root, issue_id)
+    File.mkdir_p!(Path.dirname(cache_path))
+
+    File.write!(
+      cache_path,
+      Jason.encode!(%{
+        comment: nil,
+        issue_id: issue_id,
+        cached_unix_ms: System.system_time(:millisecond)
+      })
+    )
+
+    create =
+      "## Codex Workpad\n\nfresh after malformed cache payload"
+      |> workpad_create_args(issue_id)
+      |> execute_with_client(stale_comment_lookup_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates continue after cached-comment lookup errors" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-cached-comment-error-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
     error_table = :ets.new(:workpad_bootstrap_guard_cached_comment_error, [:public])
 
@@ -633,6 +743,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       |> output()
 
     assert get_in(lookup_error, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(error_table, :comment_create) == 1
   end
 
   test "linear_graphql workpad creates guard aliased input object variables" do
@@ -1773,7 +1884,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     Path.join([
       Path.expand(workspace_root),
       ".symphony-workpad-bootstrap-cache",
-      issue_id <> ".json"
+      String.replace(issue_id, ~r/[^a-zA-Z0-9_-]/, "_") <> ".json"
     ])
   end
 
