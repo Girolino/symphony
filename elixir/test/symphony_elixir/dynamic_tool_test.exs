@@ -714,7 +714,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
-  test "linear_graphql workpad creates continue after cached-comment lookup errors" do
+  test "linear_graphql workpad creates fail closed after cached-comment lookup errors" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -740,10 +740,14 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       "## Codex Workpad\n\nfresh after lookup error"
       |> workpad_create_args("issue-cached-comment-error")
       |> execute_with_client(cached_comment_error_workpad_linear_client(error_table))
-      |> output()
 
-    assert get_in(lookup_error, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
-    assert count_workpad_calls(error_table, :comment_create) == 1
+    assert lookup_error["success"] == false
+
+    assert get_in(Jason.decode!(lookup_error["output"]), ["error", "reason"]) ==
+             "{:cached_workpad_comment_lookup_failed, \"cached-workpad\", :cached_comment_lookup_failed}"
+
+    assert count_workpad_calls(error_table, :comment_create) == 0
+    assert File.exists?(workpad_cache_path(workspace_root, "issue-cached-comment-error"))
   end
 
   test "linear_graphql workpad creates guard aliased input object variables" do

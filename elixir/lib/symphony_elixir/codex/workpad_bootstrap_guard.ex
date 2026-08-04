@@ -93,6 +93,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   defp reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id) do
     case read_recent_workpad_cache(issue_id, comments, linear_client) do
       {:ok, comment} -> {:ok, reuse_response(comment, [])}
+      {:error, reason} -> {:error, reason}
       :miss -> create_workpad(query, variables, linear_client, issue_id)
     end
   end
@@ -477,7 +478,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
          true <- recent_workpad_cache_fresh?(cache),
          %{} = comment <- map_get(cache, "comment"),
          true <- cached_workpad_comment_shape?(comment) do
-      validate_recent_workpad_cache(cache_path, comment, visible_comments, linear_client)
+      validate_recent_workpad_cache(cache_path, issue_id, comment, visible_comments, linear_client)
     else
       {:error, :enoent} ->
         :miss
@@ -501,7 +502,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     _error in [ArgumentError, File.Error] -> :miss
   end
 
-  defp validate_recent_workpad_cache(cache_path, comment, visible_comments, linear_client) do
+  defp validate_recent_workpad_cache(cache_path, issue_id, comment, visible_comments, linear_client) do
     comment_id = map_get(comment, "id")
 
     case Enum.find(visible_comments, &(map_get(&1, "id") == comment_id)) do
@@ -510,11 +511,11 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
         :miss
 
       nil ->
-        verify_cached_workpad_comment(cache_path, comment_id, linear_client)
+        verify_cached_workpad_comment(cache_path, issue_id, comment_id, linear_client)
     end
   end
 
-  defp verify_cached_workpad_comment(cache_path, comment_id, linear_client) do
+  defp verify_cached_workpad_comment(cache_path, issue_id, comment_id, linear_client) do
     case fetch_workpad_comment(linear_client, comment_id) do
       {:ok, %{} = comment} ->
         if active_workpad_comment?(comment) do
@@ -528,8 +529,13 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
         remove_recent_workpad_cache(cache_path)
         :miss
 
-      {:error, _reason} ->
-        :miss
+      {:error, reason} ->
+        Logger.warning(
+          "Failing closed after cached workpad lookup failure " <>
+            "issue_id=#{issue_id} comment_id=#{comment_id} reason=#{inspect(reason)}"
+        )
+
+        {:error, {:cached_workpad_comment_lookup_failed, comment_id, reason}}
     end
   end
 

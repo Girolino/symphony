@@ -886,8 +886,10 @@ create coordination artifacts under the normalized workspace root:
 
 The workpad bootstrap cache is a temporary convergence aid for stale tracker comment reads. A cache
 entry is reusable for at most five minutes and only after a direct tracker lookup confirms that the
-cached comment still exists, is unresolved, and starts with `## Codex Workpad`. Missing, resolved,
-stale, or malformed cache entries MUST NOT resurrect historical workpads.
+cached comment still exists, is unresolved, and starts with `## Codex Workpad`. If that direct lookup
+fails for a fresh, well-formed cache entry, the bootstrap request MUST fail closed before issuing a
+new `commentCreate`; the cache is retained for retry. Missing, resolved, stale, or malformed cache
+entries MUST NOT resurrect historical workpads.
 
 When a create request converges on an existing active workpad, the dynamic tool response keeps the
 normal `commentCreate` shape, returns the canonical comment, sets `reusedExistingWorkpad=true`, and
