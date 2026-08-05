@@ -14,3 +14,9 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   secret_key_base: String.duplicate("s", 64),
   check_origin: false,
   server: false
+
+env_config = "#{config_env()}.exs"
+
+if File.exists?(Path.join(__DIR__, env_config)) do
+  import_config env_config
+end
