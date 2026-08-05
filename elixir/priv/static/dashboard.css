@@ -329,6 +329,53 @@ pre,
   white-space: nowrap;
 }
 
+.toolbar-button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  border-radius: var(--radius-small);
+  padding: 5px 12px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+
+.toolbar-button:hover {
+  filter: brightness(1.15);
+}
+
+.toolbar-button-pause {
+  border: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.toolbar-button-resume {
+  border: 1px solid var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+}
+
+.pause-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-small);
+  background: var(--amber-soft);
+  padding: 10px 14px;
+  color: var(--amber);
+}
+
+.pause-banner span {
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
 .metrics-panel,
 .cockpit-grid,
 .lower-grid,

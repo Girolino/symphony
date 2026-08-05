@@ -42,6 +42,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("pause_dispatch", _params, socket) do
+    _ = SymphonyElixir.DispatchPause.pause()
+    request_orchestrator_refresh()
+    {:noreply, assign(socket, :payload, load_payload())}
+  end
+
+  @impl true
+  def handle_event("resume_dispatch", _params, socket) do
+    _ = SymphonyElixir.DispatchPause.resume()
+    request_orchestrator_refresh()
+    {:noreply, assign(socket, :payload, load_payload())}
+  end
+
+  defp request_orchestrator_refresh do
+    SymphonyElixir.Orchestrator.request_refresh()
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp dispatch_paused?(payload), do: Map.get(payload, :dispatch_paused, false) == true
+
+  @impl true
   def render(assigns) do
     ~H"""
     <section class="operator-cockpit" aria-label="Symphony operator cockpit">
@@ -121,8 +145,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="toolbar-actions" aria-label="Runtime summary">
             <span class="toolbar-chip"><%= @workflow_meta.tracker_kind %></span>
             <span class="toolbar-chip">Runtime <%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></span>
+            <%= if dispatch_paused?(@payload) do %>
+              <button class="toolbar-button toolbar-button-resume" phx-click="resume_dispatch" title="Resume claiming new issues">
+                ▶ Resume
+              </button>
+            <% else %>
+              <button class="toolbar-button toolbar-button-pause" phx-click="pause_dispatch" title="Stop claiming new issues; running agents finish their work">
+                ⏸ Pause
+              </button>
+            <% end %>
           </div>
         </header>
+
+        <%= if dispatch_paused?(@payload) do %>
+          <section class="pause-banner" aria-live="polite">
+            <strong>Dispatch paused</strong>
+            <span>No new issues will be claimed. Running agents keep working until they finish. Resume to re-open the lane.</span>
+          </section>
+        <% end %>
 
         <%= if @payload[:error] do %>
           <section class="error-panel" aria-live="polite">

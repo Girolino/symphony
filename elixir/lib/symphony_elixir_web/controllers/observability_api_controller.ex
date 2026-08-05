@@ -55,6 +55,38 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec pause_dispatch(Conn.t(), map()) :: Conn.t()
+  def pause_dispatch(conn, _params) do
+    case SymphonyElixir.DispatchPause.pause() do
+      :ok ->
+        notify_observability_change()
+        json(conn, Map.put(SymphonyElixir.DispatchPause.status(), :dispatch_paused, true))
+
+      {:error, reason} ->
+        error_response(conn, 500, "pause_write_failed", "Could not persist pause flag: #{inspect(reason)}")
+    end
+  end
+
+  @spec resume_dispatch(Conn.t(), map()) :: Conn.t()
+  def resume_dispatch(conn, _params) do
+    case SymphonyElixir.DispatchPause.resume() do
+      :ok ->
+        notify_observability_change()
+        json(conn, %{dispatch_paused: false, paused: false, paused_at: nil})
+
+      {:error, reason} ->
+        error_response(conn, 500, "resume_failed", "Could not remove pause flag: #{inspect(reason)}")
+    end
+  end
+
+  defp notify_observability_change do
+    SymphonyElixir.Orchestrator.request_refresh(orchestrator())
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")

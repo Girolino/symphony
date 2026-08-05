@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Orchestrator do
     AgentRunLease,
     AgentRunner,
     Config,
+    DispatchPause,
     Linear.Client,
     MetricsLedger,
     OrchestratorSnapshotStore,
@@ -469,10 +470,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_choose_issues(issues, %State{} = state) do
-    if available_slots(state) > 0 do
-      choose_issues(issues, state)
-    else
-      state
+    cond do
+      DispatchPause.paused?() -> state
+      available_slots(state) > 0 -> choose_issues(issues, state)
+      true -> state
     end
   end
 
@@ -2089,6 +2090,7 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: blocked,
       codex_totals: state.codex_totals,
       rate_limits: Map.get(state, :codex_rate_limits),
+      dispatch_paused: DispatchPause.paused?(),
       polling: %{
         checking?: state.poll_check_in_progress == true,
         next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
