@@ -88,6 +88,15 @@ Optional flags:
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
 
+Daemon/runtime logs use `log/symphony.log*` under the selected logs root. Test
+runs write their rotating disk logs under `log/test/symphony.log*` so upkeep
+inspection can scan daemon patterns without treating synthetic fixture events as
+runtime incidents.
+
+Use `mix logs.inspect` for upkeep log inspection. It defaults to runtime logs;
+pass `--source test` only when debugging synthetic fixture output, and pass
+`--logs-root <path>` when inspecting a daemon started with a custom logs root.
+
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
