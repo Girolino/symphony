@@ -275,6 +275,31 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
+  test "linear_graphql inline block string workpad creates converge after kickoff races" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_block_string_race, [:public])
+
+    client = inline_workpad_linear_client(table)
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          "## Codex Workpad\n\ninline block string created by #{index}"
+          |> inline_block_string_workpad_create_args()
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert count_workpad_calls(table, :comment_lookup) >= 2
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
   test "linear_graphql workpad creates converge when Linear hides newly created comments" do
     workspace_root =
       Path.join(
@@ -814,6 +839,28 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
         Task.async(fn ->
           %{"query" => query}
           |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad creates guard inline input variable references" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_input_variables, [:public])
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          "## Codex Workpad\n\ncreated by #{index}"
+          |> inline_variable_workpad_create_args()
+          |> execute_with_client(inline_variable_workpad_linear_client(table))
           |> output()
         end)
       end)
@@ -1611,6 +1658,51 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
+  defp inline_block_string_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: #{Jason.encode!(issue_id)}, body: #{graphql_block_string(body)}}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
+  defp graphql_block_string(value) do
+    escaped = String.replace(value, ~S("""), ~S(\"""))
+    ~s(\"\"\"#{escaped}\"\"\")
+  end
+
+  defp inline_variable_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($ticket: String!, $pad: String!) {
+        commentCreate(input: {issueId: $ticket, body: $pad}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{"ticket" => issue_id, "pad" => body}
+    }
+  end
+
   defp workpad_update_args(id, body) do
     %{
       "query" => """
@@ -1669,6 +1761,21 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     fn query, variables, opts ->
       if String.contains?(query, "commentCreate") and variables == %{} do
         handle_workpad_create(table, inline_variables)
+      else
+        workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+  end
+
+  defp inline_variable_workpad_linear_client(table) do
+    fn query, variables, opts ->
+      if String.contains?(query, "commentCreate") do
+        handle_workpad_create(table, %{
+          "input" => %{
+            "body" => Map.fetch!(variables, "pad"),
+            "issueId" => Map.fetch!(variables, "ticket")
+          }
+        })
       else
         workpad_linear_client(table).(query, variables, opts)
       end

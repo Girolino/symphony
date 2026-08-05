@@ -167,7 +167,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     if String.contains?(query, "commentCreate") do
       variables
       |> find_workpad_create_issue_id()
-      |> maybe_find_inline_workpad_create_issue_id(query)
+      |> maybe_find_inline_workpad_create_issue_id(query, variables)
     else
       :ignore
     end
@@ -635,15 +635,15 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp maybe_find_inline_workpad_create_issue_id({:ok, _issue_id} = result, _query), do: result
-  defp maybe_find_inline_workpad_create_issue_id(:ignore, query), do: find_inline_workpad_create_issue_id(query)
+  defp maybe_find_inline_workpad_create_issue_id({:ok, _issue_id} = result, _query, _variables), do: result
+  defp maybe_find_inline_workpad_create_issue_id(:ignore, query, variables), do: find_inline_workpad_create_issue_id(query, variables)
 
-  defp find_inline_workpad_create_issue_id(query) do
+  defp find_inline_workpad_create_issue_id(query, variables) do
     with {:ok, after_create} <- after_first_match(query, "commentCreate"),
          true <- inline_input_argument?(after_create),
-         {:ok, body} <- inline_graphql_string_field(after_create, "body"),
+         {:ok, body} <- inline_graphql_field(after_create, "body", variables),
          true <- workpad_body?(body),
-         {:ok, issue_id} <- inline_graphql_string_field(after_create, "issueId"),
+         {:ok, issue_id} <- inline_graphql_field(after_create, "issueId", variables),
          true <- issue_id != "" do
       {:ok, issue_id}
     else
@@ -666,6 +666,20 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     Regex.match?(~r/^\s*\(\s*input\s*:/s, value)
   end
 
+  defp inline_graphql_field(query, field, variables) do
+    case inline_graphql_block_string_field(query, field) do
+      {:ok, _value} = result -> result
+      :error -> inline_graphql_quoted_string_or_variable_field(query, field, variables)
+    end
+  end
+
+  defp inline_graphql_quoted_string_or_variable_field(query, field, variables) do
+    case inline_graphql_string_field(query, field) do
+      {:ok, _value} = result -> result
+      :error -> inline_graphql_variable_field(query, field, variables)
+    end
+  end
+
   defp inline_graphql_string_field(query, field) do
     escaped_field = Regex.escape(field)
 
@@ -677,6 +691,44 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
     case Regex.run(regex, query, capture: :all_but_first) do
       [value] -> Jason.decode(~s("#{value}"))
+      _ -> :error
+    end
+  end
+
+  defp inline_graphql_block_string_field(query, field) do
+    escaped_field = Regex.escape(field)
+
+    regex =
+      Regex.compile!(
+        ~S/(?:^|[^a-zA-Z0-9_])/ <>
+          escaped_field <>
+          ~S/\s*:\s*"""((?:\\"""|(?:(?!""").))*)"""/,
+        "s"
+      )
+
+    case Regex.run(regex, query, capture: :all_but_first) do
+      [value] -> {:ok, decode_graphql_block_string(value)}
+      _ -> :error
+    end
+  end
+
+  defp decode_graphql_block_string(value) do
+    String.replace(value, ~S(\"""), ~S("""))
+  end
+
+  defp inline_graphql_variable_field(query, field, variables) do
+    escaped_field = Regex.escape(field)
+
+    regex =
+      Regex.compile!(
+        ~S/(?:^|[^a-zA-Z0-9_])/ <> escaped_field <> ~S/\s*:\s*\$([_a-zA-Z][_a-zA-Z0-9]*)/,
+        "s"
+      )
+
+    with [variable_name] <- Regex.run(regex, query, capture: :all_but_first),
+         value when is_binary(value) <- map_get(variables, variable_name) do
+      {:ok, value}
+    else
       _ -> :error
     end
   end
