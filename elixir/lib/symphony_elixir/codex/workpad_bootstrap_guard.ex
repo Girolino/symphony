@@ -639,26 +639,41 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   defp maybe_find_inline_workpad_create_issue_id(:ignore, query, variables), do: find_inline_workpad_create_issue_id(query, variables)
 
   defp find_inline_workpad_create_issue_id(query, variables) do
-    with {:ok, after_create} <- after_first_match(query, "commentCreate"),
-         {:ok, input} <- inline_input_object(after_create),
-         {:ok, body} <- inline_graphql_field(input, "body", variables),
+    find_inline_workpad_create_issue_id(query, variables, 0)
+  end
+
+  defp find_inline_workpad_create_issue_id(query, variables, index) do
+    case next_inline_comment_create_input(query, index) do
+      {:ok, input, next_index} ->
+        case workpad_create_issue_id_from_inline_input(input, variables) do
+          {:ok, _issue_id} = result -> result
+          :ignore -> find_inline_workpad_create_issue_id(query, variables, next_index)
+        end
+
+      :error ->
+        :ignore
+    end
+  end
+
+  defp next_inline_comment_create_input(query, index) do
+    with {:ok, after_create_index} <- next_graphql_name_match(query, "commentCreate", index) do
+      after_create = binary_part(query, after_create_index, byte_size(query) - after_create_index)
+
+      case inline_input_object(after_create) do
+        {:ok, input} -> {:ok, input, after_create_index}
+        :error -> next_inline_comment_create_input(query, after_create_index)
+      end
+    end
+  end
+
+  defp workpad_create_issue_id_from_inline_input(input, variables) do
+    with {:ok, body} <- inline_graphql_field(input, "body", variables),
          true <- workpad_body?(body),
          {:ok, issue_id} <- inline_graphql_field(input, "issueId", variables),
          true <- issue_id != "" do
       {:ok, issue_id}
     else
       _ -> :ignore
-    end
-  end
-
-  defp after_first_match(value, match) do
-    case :binary.match(value, match) do
-      {index, match_size} ->
-        start = index + match_size
-        {:ok, binary_part(value, start, byte_size(value) - start)}
-
-      :nomatch ->
-        :error
     end
   end
 
@@ -672,58 +687,117 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp inline_graphql_field(query, field, variables) do
-    escaped_field = Regex.escape(field)
-    query = strip_graphql_comments(query)
+    inline_graphql_field(query, field, variables, 0, 0)
+  end
 
-    regex =
-      Regex.compile!(
-        ~S/(?:^|[^a-zA-Z0-9_])/ <>
-          escaped_field <>
-          ~S/\s*:\s*(?:"""((?:\\"""|(?:(?!""").))*)"""|"((?:\\.|[^"\\])*)"|\$([_a-zA-Z][_a-zA-Z0-9]*))/,
-        "s"
-      )
+  defp inline_graphql_field(query, _field, _variables, index, _depth) when index >= byte_size(query), do: :error
 
-    case Regex.run(regex, query, capture: :all_but_first) do
-      [block_value] ->
-        inline_graphql_field_value(variables, block_value, nil, nil)
+  defp inline_graphql_field(query, field, variables, index, depth) do
+    case next_inline_graphql_field_scan_step(query, field, variables, index, depth) do
+      {:ok, _value} = result -> result
+      {:cont, next_index, next_depth} -> inline_graphql_field(query, field, variables, next_index, next_depth)
+    end
+  end
 
-      [block_value, quoted_value] ->
-        inline_graphql_field_value(variables, block_value, quoted_value, nil)
+  defp next_inline_graphql_field_scan_step(query, field, variables, index, depth) do
+    case next_inline_graphql_structure_step(query, index, depth) do
+      {:cont, _next_index, _next_depth} = result -> result
+      :field_candidate -> maybe_parse_inline_graphql_field(query, field, variables, index, depth)
+    end
+  end
 
-      [block_value, quoted_value, variable_name] ->
-        inline_graphql_field_value(variables, block_value, quoted_value, variable_name)
+  defp next_inline_graphql_structure_step(query, index, depth) do
+    cond do
+      starts_with_at?(query, index, ~S(""")) -> skip_inline_graphql_block_string_step(query, index, depth)
+      starts_with_at?(query, index, ~S(")) -> skip_inline_graphql_string_step(query, index, depth)
+      starts_with_at?(query, index, "#") -> {:cont, skip_graphql_comment(query, index), depth}
+      starts_with_at?(query, index, "{") -> {:cont, index + 1, depth + 1}
+      starts_with_at?(query, index, "}") -> {:cont, index + 1, max(depth - 1, 0)}
+      true -> :field_candidate
+    end
+  end
 
-      _ ->
+  defp skip_inline_graphql_block_string_step(query, index, depth) do
+    with {:ok, next_index} <- skip_graphql_block_string(query, index + 3) do
+      {:cont, next_index, depth}
+    end
+  end
+
+  defp skip_inline_graphql_string_step(query, index, depth) do
+    with {:ok, next_index} <- skip_graphql_string(query, index + 1) do
+      {:cont, next_index, depth}
+    end
+  end
+
+  defp maybe_parse_inline_graphql_field(query, field, variables, index, depth) do
+    if depth == 0 and graphql_name_match_at?(query, index, field) do
+      case parse_inline_graphql_field_value(query, index + byte_size(field), variables) do
+        {:ok, _value} = result -> result
+        :error -> {:cont, index + 1, depth}
+      end
+    else
+      {:cont, index + 1, depth}
+    end
+  end
+
+  defp parse_inline_graphql_field_value(query, after_field_index, variables) do
+    colon_index = skip_graphql_ignored(query, after_field_index)
+
+    case starts_with_at?(query, colon_index, ":") do
+      true ->
+        value_index = skip_graphql_ignored(query, colon_index + 1)
+        parse_inline_graphql_value(query, value_index, variables)
+
+      false ->
         :error
     end
   end
 
-  defp inline_graphql_field_value(_variables, block_value, _quoted_value, _variable_name)
-       when is_binary(block_value) and block_value != "" do
-    {:ok, decode_graphql_block_string(block_value)}
+  defp parse_inline_graphql_value(query, index, variables) do
+    cond do
+      starts_with_at?(query, index, ~S(""")) ->
+        parse_inline_graphql_block_string(query, index)
+
+      starts_with_at?(query, index, ~S(")) ->
+        parse_inline_graphql_string(query, index)
+
+      starts_with_at?(query, index, "$") ->
+        parse_inline_graphql_variable(query, index + 1, variables)
+
+      true ->
+        :error
+    end
   end
 
-  defp inline_graphql_field_value(_variables, _block_value, quoted_value, _variable_name)
-       when is_binary(quoted_value) and quoted_value != "" do
-    Jason.decode(~s("#{quoted_value}"))
+  defp parse_inline_graphql_block_string(query, index) do
+    content_start = index + 3
+
+    with {:ok, next_index} <- skip_graphql_block_string(query, content_start) do
+      content_size = next_index - content_start - 3
+      {:ok, query |> binary_part(content_start, content_size) |> decode_graphql_block_string()}
+    end
   end
 
-  defp inline_graphql_field_value(variables, _block_value, _quoted_value, variable_name)
-       when is_binary(variable_name) and variable_name != "" do
-    inline_graphql_variable_value(variables, variable_name)
+  defp parse_inline_graphql_string(query, index) do
+    content_start = index + 1
+
+    with {:ok, next_index} <- skip_graphql_string(query, content_start) do
+      content_size = next_index - content_start - 1
+      Jason.decode(~s("#{binary_part(query, content_start, content_size)}"))
+    end
   end
 
-  defp inline_graphql_field_value(_variables, _block_value, _quoted_value, _variable_name), do: :error
+  defp parse_inline_graphql_variable(query, index, variables) do
+    with {:ok, variable_name, _next_index} <- parse_graphql_name(query, index),
+         value when is_binary(value) <- map_get(variables, variable_name) do
+      {:ok, value}
+    else
+      _ -> :error
+    end
+  end
 
   defp decode_graphql_block_string(value) do
     String.replace(value, ~S(\"""), ~S("""))
-  end
-
-  defp inline_graphql_variable_value(variables, variable_name) do
-    case map_get(variables, variable_name) do
-      value when is_binary(value) -> {:ok, value}
-      _ -> :error
-    end
   end
 
   defp take_balanced_graphql_object(value, object_start) do
@@ -767,46 +841,87 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp strip_graphql_comments(value) do
-    value
-    |> strip_graphql_comments(0, [])
-    |> Enum.reverse()
-    |> IO.iodata_to_binary()
-  end
-
-  defp strip_graphql_comments(value, index, acc) do
-    if index >= byte_size(value) do
-      acc
-    else
-      case next_graphql_comment_strip_step(value, index) do
-        {:cont, next_index, chunk} -> strip_graphql_comments(value, next_index, [chunk | acc])
-        {:done, chunk} -> [chunk | acc]
-      end
-    end
-  end
-
-  defp next_graphql_comment_strip_step(value, index) do
+  defp next_graphql_name_match(value, name, index) do
     cond do
+      index >= byte_size(value) ->
+        :error
+
       starts_with_at?(value, index, ~S(""")) ->
-        preserve_graphql_literal(value, index, 3, &skip_graphql_block_string/2)
+        with {:ok, next_index} <- skip_graphql_block_string(value, index + 3) do
+          next_graphql_name_match(value, name, next_index)
+        end
 
       starts_with_at?(value, index, ~S(")) ->
-        preserve_graphql_literal(value, index, 1, &skip_graphql_string/2)
+        with {:ok, next_index} <- skip_graphql_string(value, index + 1) do
+          next_graphql_name_match(value, name, next_index)
+        end
 
       starts_with_at?(value, index, "#") ->
-        {:cont, skip_graphql_comment(value, index), " "}
+        next_graphql_name_match(value, name, skip_graphql_comment(value, index))
+
+      graphql_name_match_at?(value, index, name) ->
+        {:ok, index + byte_size(name)}
 
       true ->
-        {:cont, index + 1, binary_part(value, index, 1)}
+        next_graphql_name_match(value, name, index + 1)
     end
   end
 
-  defp preserve_graphql_literal(value, index, offset, skipper) do
-    case skipper.(value, index + offset) do
-      {:ok, next_index} -> {:cont, next_index, binary_part(value, index, next_index - index)}
-      :error -> {:done, binary_part(value, index, byte_size(value) - index)}
+  defp skip_graphql_ignored(value, index) do
+    cond do
+      index >= byte_size(value) ->
+        index
+
+      graphql_ignored_byte?(:binary.at(value, index)) ->
+        skip_graphql_ignored(value, index + 1)
+
+      starts_with_at?(value, index, "#") ->
+        skip_graphql_ignored(value, skip_graphql_comment(value, index))
+
+      true ->
+        index
     end
   end
+
+  defp parse_graphql_name(value, index) do
+    cond do
+      index >= byte_size(value) ->
+        :error
+
+      not graphql_name_start_byte?(:binary.at(value, index)) ->
+        :error
+
+      true ->
+        name_end = graphql_name_end(value, index + 1)
+        {:ok, binary_part(value, index, name_end - index), name_end}
+    end
+  end
+
+  defp graphql_name_end(value, index) do
+    if index < byte_size(value) and graphql_name_byte?(:binary.at(value, index)) do
+      graphql_name_end(value, index + 1)
+    else
+      index
+    end
+  end
+
+  defp graphql_name_match_at?(value, index, name) do
+    name_size = byte_size(name)
+
+    starts_with_at?(value, index, name) and
+      graphql_name_boundary_at?(value, index - 1) and
+      graphql_name_boundary_at?(value, index + name_size)
+  end
+
+  defp graphql_name_boundary_at?(value, index) do
+    index < 0 or index >= byte_size(value) or not graphql_name_byte?(:binary.at(value, index))
+  end
+
+  defp graphql_ignored_byte?(byte), do: byte in [?\s, ?\n, ?\r, ?\t, ?,]
+
+  defp graphql_name_byte?(byte), do: graphql_name_start_byte?(byte) or byte in ?0..?9
+
+  defp graphql_name_start_byte?(byte), do: byte == ?_ or byte in ?a..?z or byte in ?A..?Z
 
   defp skip_graphql_string(value, index) do
     cond do

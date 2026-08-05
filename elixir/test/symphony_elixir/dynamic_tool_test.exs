@@ -325,6 +325,62 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
+  test "linear_graphql inline workpad creates skip operation names and comments before the field" do
+    cases = [
+      {:workpad_bootstrap_guard_inline_operation_name, &inline_operation_name_workpad_create_args/1},
+      {:workpad_bootstrap_guard_inline_comment_prefix, &inline_comment_prefixed_workpad_create_args/1}
+    ]
+
+    for {table_name, args_fun} <- cases do
+      table = :ets.new(table_name, [:public])
+      client = inline_workpad_linear_client(table)
+
+      results =
+        1..2
+        |> Enum.map(fn index ->
+          Task.async(fn ->
+            "## Codex Workpad\n\n#{table_name} #{index}"
+            |> args_fun.()
+            |> execute_with_client(client)
+            |> output()
+          end)
+        end)
+        |> Enum.map(&Task.await(&1, 5_000))
+
+      assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+               ["workpad-1", "workpad-1"]
+
+      assert count_workpad_calls(table, :comment_create) == 1
+      assert count_workpad_calls(table, :comment_lookup) >= 2
+      assert active_workpad_ids(table) == ["workpad-1"]
+    end
+  end
+
+  test "linear_graphql inline workpad creates ignore field-like text inside body literals" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_body_shadowed_issue_id, [:public])
+
+    body = """
+    ## Codex Workpad
+
+    Mentioned text must not win:
+    issueId: "issue-wrong"
+    """
+
+    create =
+      body
+      |> inline_body_before_issue_id_workpad_create_args()
+      |> execute_with_client(inline_workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert active_workpad_ids(table) == ["workpad-1"]
+
+    assert table
+           |> workpad_call_variables(:comment_lookup)
+           |> Enum.all?(&(Map.fetch!(&1, "issueId") == "issue-workpad-race"))
+  end
+
   test "linear_graphql inline workpad creates scan past nested input objects" do
     table = :ets.new(:workpad_bootstrap_guard_inline_nested_input_race, [:public])
 
@@ -1799,6 +1855,70 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
+  defp inline_operation_name_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation commentCreateWorkpad {
+        commentCreate(input: {issueId: #{Jason.encode!(issue_id)}, body: #{Jason.encode!(body)}}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
+  defp inline_comment_prefixed_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      # commentCreate(input: {issueId: "issue-wrong", body: \"\"\"not a workpad\"\"\"})
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: #{Jason.encode!(issue_id)}, body: #{Jason.encode!(body)}}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
+  defp inline_body_before_issue_id_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad {
+        commentCreate(input: {
+          body: #{graphql_block_string(body)}
+          issueId: #{Jason.encode!(issue_id)}
+        }) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
   defp inline_nested_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
     %{
       "query" => """
@@ -2112,6 +2232,17 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       {{:call, _sequence}, {^kind, _variables}} -> true
       _entry -> false
     end)
+  end
+
+  defp workpad_call_variables(table, kind) do
+    table
+    |> :ets.tab2list()
+    |> Enum.flat_map(fn
+      {{:call, sequence}, {^kind, variables}} -> [{sequence, variables}]
+      _entry -> []
+    end)
+    |> Enum.sort_by(fn {sequence, _variables} -> sequence end)
+    |> Enum.map(fn {_sequence, variables} -> variables end)
   end
 
   defp record_workpad_call(table, kind, variables) do
