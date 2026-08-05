@@ -284,7 +284,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       1..2
       |> Enum.map(fn index ->
         Task.async(fn ->
-          "## Codex Workpad\n\ninline block string created by #{index}"
+          "## Codex Workpad\n\ninline block string with \"\"\" delimiter #{index}"
           |> inline_block_string_workpad_create_args()
           |> execute_with_client(client)
           |> output()
@@ -297,6 +297,55 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert count_workpad_calls(table, :comment_create) == 1
     assert count_workpad_calls(table, :comment_lookup) >= 2
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql inline workpad creates ignore commented block-string fields" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_comment_field_race, [:public])
+
+    client = inline_workpad_linear_client(table)
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          "## Codex Workpad\n\nquoted body before commented block #{index}"
+          |> inline_commented_workpad_create_args()
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert count_workpad_calls(table, :comment_lookup) >= 2
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql inline workpad creates scan past nested input objects" do
+    table = :ets.new(:workpad_bootstrap_guard_inline_nested_input_race, [:public])
+
+    client = inline_workpad_linear_client(table)
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          "## Codex Workpad\n\nnested input #{index}"
+          |> inline_nested_workpad_create_args()
+          |> execute_with_client(client)
+          |> output()
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, &get_in(&1, ["data", "commentCreate", "comment", "id"])) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
@@ -895,6 +944,54 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       )
 
     assert response["success"] == true
+    assert_received {:unguarded_inline_create, _query, %{}, []}
+  end
+
+  test "linear_graphql malformed inline workpad creates pass through unguarded" do
+    test_pid = self()
+
+    queries = [
+      ~S"""
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: "issue-workpad-race", body: "## Codex Workpad
+      }
+      """,
+      ~S"""
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: "issue-workpad-race", body: \"""## Codex Workpad
+      }
+      """,
+      ~S"""
+      mutation CreateWorkpad {
+        commentCreate(input: {issueId: "issue-workpad-race" # body never appears
+      }
+      """,
+      ~S"""
+      mutation CreateWorkpad($missingBody: String!) {
+        commentCreate(input: {issueId: "issue-workpad-race", body: $missingBody}) {
+          success
+        }
+      }
+      """
+    ]
+
+    for query <- queries do
+      response =
+        DynamicTool.execute(
+          "linear_graphql",
+          %{"query" => query, "variables" => %{}},
+          linear_client: fn forwarded_query, variables, opts ->
+            send(test_pid, {:unguarded_inline_create, forwarded_query, variables, opts})
+            {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+          end
+        )
+
+      assert response["success"] == true
+    end
+
+    assert_received {:unguarded_inline_create, _query, %{}, []}
+    assert_received {:unguarded_inline_create, _query, %{}, []}
+    assert_received {:unguarded_inline_create, _query, %{}, []}
     assert_received {:unguarded_inline_create, _query, %{}, []}
   end
 
@@ -1663,6 +1760,54 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       "query" => """
       mutation CreateWorkpad {
         commentCreate(input: {issueId: #{Jason.encode!(issue_id)}, body: #{graphql_block_string(body)}}) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
+  defp inline_commented_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad {
+        commentCreate(input: {
+          issueId: #{Jason.encode!(issue_id)}
+          body: #{Jason.encode!(body)}
+          # body: \"\"\"not a workpad\"\"\"
+        }) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{}
+    }
+  end
+
+  defp inline_nested_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad {
+        commentCreate(input: {
+          metadata: {ignored: "}"}
+          issueId: #{Jason.encode!(issue_id)}
+          body: #{Jason.encode!(body)}
+        }) {
           success
           comment {
             id
