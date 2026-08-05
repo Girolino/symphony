@@ -876,7 +876,10 @@ Workspace persistence:
 ### 9.1.1 Workpad Bootstrap Guard Artifacts
 
 When the Linear dynamic tool handles a `## Codex Workpad` bootstrap create, implementations MAY
-create coordination artifacts under the normalized workspace root:
+create coordination artifacts under the normalized workspace root. A bootstrap create is any
+`commentCreate` whose input body starts with `## Codex Workpad`, including bodies and issue ids
+provided through variables, inline quoted strings, GraphQL block strings, or inline field variable
+references:
 
 - `<workspace.root>/.symphony-workpad-bootstrap-locks/<safe_issue_id>` for the per-issue create lock.
 - `<workspace.root>/.symphony-workpad-bootstrap-cache/<safe_issue_id>.json` for the most recently

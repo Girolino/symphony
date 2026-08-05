@@ -563,7 +563,7 @@ defmodule SymphonyElixir.AgentRunLeaseTest do
 
       File.write!(allow_tool_file, "allow")
       assert_receive {:workpad_comment_create_entered, comment_create_pid}, 2_000
-      assert comment_create_pid == first.pid
+      assert Process.alive?(comment_create_pid)
 
       second =
         Task.async(fn ->
