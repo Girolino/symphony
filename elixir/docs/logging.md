@@ -32,6 +32,17 @@ When logging Codex execution lifecycle events, include:
 - `Orchestrator`: log dispatch, retry, terminal/non-active transitions, and worker exits with issue context. Include `session_id` whenever running-entry data has it.
 - `Codex.AppServer`: log session start/completion/error with issue context and `session_id`.
 
+## Log Families And Upkeep Inspection
+
+Runtime logs use the rotating `log/symphony.log*` family under the selected
+logs root. Test runs write synthetic fixture output under
+`log/test/symphony.log*`.
+
+Use `mix logs.inspect` for upkeep scans. The default source is runtime logs, so
+fixture-only Linear auth, retry, breaker, and stall events are not counted as
+daemon incidents. Use `mix logs.inspect --source test` only when intentionally
+debugging fixture output.
+
 ## Codex Side Output
 
 `Codex.AppServer` logs non-JSON Codex stream output at warning level when it looks
