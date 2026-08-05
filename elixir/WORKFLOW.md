@@ -377,7 +377,9 @@ engine: it converts detected friction into queued work.
    Any failure here is itself a finding.
 2. Inspect the metrics ledger and recent daemon logs for failure/retry
    patterns (repeated retries on one issue class, breaker parks, stalled
-   sessions).
+   sessions). Daemon/runtime logs live at `log/symphony.log*` for local runs or
+   under the configured `--logs-root`; test-fixture logs live at
+   `log/test/symphony.log*` and must not be counted as daemon incidents.
 3. Reconcile repo hygiene WITHIN the workspace only: report (do not delete)
    stale branches, parked worktrees, and releases older than the last five in
    `~/.cache/symphony-releases`.
