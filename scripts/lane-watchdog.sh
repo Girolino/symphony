@@ -10,16 +10,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PORT="${SYMPHONY_LANE_PORT:-4767}"
 LABEL="com.symphony.lane"
-READBACK_ATTEMPTS="${SYMPHONY_WATCHDOG_READBACK_ATTEMPTS:-5}"
+# Probe immediately, then once per second through the supported 30s boot window
+# used by the release promotion path.
+READBACK_ATTEMPTS="${SYMPHONY_WATCHDOG_READBACK_ATTEMPTS:-31}"
 READBACK_SLEEP_SECONDS="${SYMPHONY_WATCHDOG_READBACK_SLEEP_SECONDS:-1}"
 
 case "$READBACK_ATTEMPTS" in
-  "" | *[!0-9]*) READBACK_ATTEMPTS=5 ;;
+  "" | *[!0-9]*) READBACK_ATTEMPTS=31 ;;
 esac
 
 case "$READBACK_SLEEP_SECONDS" in
   "" | *[!0-9]*) READBACK_SLEEP_SECONDS=1 ;;
 esac
+
+if [ "$READBACK_ATTEMPTS" -lt 1 ]; then
+  READBACK_ATTEMPTS=31
+fi
 
 state_url() {
   printf 'http://127.0.0.1:%s/api/v1/state' "$PORT"
@@ -41,20 +47,25 @@ try do
       status = Map.get(health, "status")
       degraded_reason = Map.get(health, "degraded_reason")
 
-      if is_binary(status) do
-        IO.write(status)
-        IO.write("\t")
-
-        if is_binary(degraded_reason) do
-          IO.write(degraded_reason)
+      normalized_status =
+        case status do
+          value when value in ["healthy", "degraded", "stale", "unavailable"] -> value
+          value when is_binary(value) -> "invalid"
+          _ -> "missing"
         end
+
+      IO.write(normalized_status)
+      IO.write("\t")
+
+      if is_binary(degraded_reason) do
+        IO.write(String.replace(degraded_reason, ~r/[\t\r\n]+/, " "))
       end
 
     _ ->
-      :ok
+      IO.write("missing\t")
   end
 rescue
-  _ -> :ok
+  _ -> IO.write("missing\t")
 end
 ') 2>/dev/null || true
 }
@@ -106,10 +117,6 @@ readback_degraded_reason=""
 
 if [ "$kickstart_status" -eq 0 ]; then
   for ((_attempt = 1; _attempt <= READBACK_ATTEMPTS; _attempt++)); do
-    if [ "$READBACK_SLEEP_SECONDS" -gt 0 ]; then
-      sleep "$READBACK_SLEEP_SECONDS"
-    fi
-
     readback_body="$(probe_body)"
     readback_health_fields="$(parse_health_fields "$readback_body")"
     IFS=$'\t' read -r readback_health_status readback_degraded_reason <<< "$readback_health_fields"
@@ -117,6 +124,10 @@ if [ "$kickstart_status" -eq 0 ]; then
     if live_health_status "$readback_health_status"; then
       verified=1
       break
+    fi
+
+    if [ "$_attempt" -lt "$READBACK_ATTEMPTS" ] && [ "$READBACK_SLEEP_SECONDS" -gt 0 ]; then
+      sleep "$READBACK_SLEEP_SECONDS"
     fi
   done
 fi
