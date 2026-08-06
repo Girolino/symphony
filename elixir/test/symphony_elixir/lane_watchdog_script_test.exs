@@ -6,9 +6,11 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
 
   setup do
     tmp_root = Path.join([@repo_root, "elixir", "tmp"])
-    tmp_dir = Path.join(tmp_root, "lane-watchdog-script-#{System.unique_integer([:positive])}")
+    tmp_suffix = "#{System.system_time(:nanosecond)}-#{System.unique_integer([:positive])}"
+    tmp_dir = Path.join(tmp_root, "lane-watchdog-script-#{tmp_suffix}")
     bin_dir = Path.join(tmp_dir, "bin")
     events_file = Path.join(tmp_dir, "events.log")
+    curl_count_file = Path.join(tmp_dir, "curl-count")
 
     File.mkdir_p!(tmp_root)
     File.mkdir!(tmp_dir)
@@ -19,7 +21,7 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
     write_executable(Path.join(bin_dir, "launchctl"), event_stub("launchctl"))
     write_executable(Path.join(bin_dir, "mise"), mise_stub())
 
-    {:ok, bin_dir: bin_dir, events_file: events_file}
+    {:ok, bin_dir: bin_dir, events_file: events_file, curl_count_file: curl_count_file}
   end
 
   test "degraded health is live enough and does not restart the daemon", context do
@@ -32,21 +34,32 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
   test "only the top-level health status controls restart decisions", context do
     body = ~s({"running":[{"status":"healthy"}],"health":{"status":"stale"}})
 
-    assert {output, 0} = run_watchdog(body, context)
+    assert {output, 0} =
+             run_watchdog(body, context, [
+               {"WATCHDOG_CURL_READBACK_BODY", ~s({"health":{"status":"healthy"}})}
+             ])
+
     assert output =~ "lane unhealthy on port 49152"
     assert output =~ "health.status=stale"
+    assert output =~ "lane restart verified on port 49152"
 
     events = File.read!(context.events_file)
     assert events =~ "launchctl kickstart -k gui/"
     assert events =~ "mise exec -- mix ops.file_issue"
     assert events =~ "health.status=stale"
+    assert events =~ "was restarted by the watchdog"
   end
 
   test "malformed health payloads with healthy text still restart the daemon", context do
     body = ~s({"health":{"status":"healthy")
 
-    assert {output, 0} = run_watchdog(body, context)
+    assert {output, 0} =
+             run_watchdog(body, context, [
+               {"WATCHDOG_CURL_READBACK_BODY", ~s({"health":{"status":"healthy"}})}
+             ])
+
     assert output =~ "health.status=missing"
+    assert output =~ "lane restart verified on port 49152"
 
     events = File.read!(context.events_file)
     assert events =~ "launchctl kickstart -k gui/"
@@ -54,13 +67,32 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
   end
 
   test "failed probes still restart the daemon with an explicit missing status", context do
-    assert {output, 0} = run_watchdog("", context, [{"WATCHDOG_CURL_EXIT", "7"}])
+    assert {output, 0} =
+             run_watchdog("", context, [
+               {"WATCHDOG_CURL_EXIT", "7"},
+               {"WATCHDOG_CURL_READBACK_BODY", ~s({"health":{"status":"healthy"}})}
+             ])
+
     assert output =~ "health.status=missing"
     assert output =~ "probe_returned_body=false"
+    assert output =~ "lane restart verified on port 49152"
 
     events = File.read!(context.events_file)
     assert events =~ "launchctl kickstart -k gui/"
     assert events =~ "mix ops.file_issue"
+  end
+
+  test "failed kickstarts report an attempted restart without claiming recovery", context do
+    body = ~s({"health":{"status":"stale"}})
+
+    assert {output, 0} = run_watchdog(body, context, [{"WATCHDOG_LAUNCHCTL_EXIT", "113"}])
+
+    assert output =~ "lane restart failed on port 49152 (launchctl_exit=113)"
+
+    events = File.read!(context.events_file)
+    assert events =~ "--title watchdog failed to restart the symphony lane daemon"
+    assert events =~ "launchctl exited 113"
+    refute events =~ "was restarted by the watchdog"
   end
 
   defp run_watchdog(body, context, extra_env \\ []) do
@@ -70,8 +102,12 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
       [
         {"PATH", context.bin_dir <> ":" <> System.get_env("PATH", "")},
         {"SYMPHONY_LANE_PORT", "49152"},
+        {"SYMPHONY_WATCHDOG_READBACK_ATTEMPTS", "1"},
+        {"SYMPHONY_WATCHDOG_READBACK_SLEEP_SECONDS", "0"},
         {"WATCHDOG_CURL_BODY", body},
+        {"WATCHDOG_CURL_COUNT_FILE", context.curl_count_file},
         {"WATCHDOG_EVENTS_FILE", context.events_file},
+        {"WATCHDOG_LAUNCHCTL_EXIT", "0"},
         {"WATCHDOG_REAL_ELIXIR", real_elixir}
       ] ++ extra_env
 
@@ -86,10 +122,26 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
   defp curl_stub do
     """
     #!/usr/bin/env bash
-    if [ "${WATCHDOG_CURL_EXIT:-0}" != "0" ]; then
-      exit "$WATCHDOG_CURL_EXIT"
+    count=0
+    if [ -f "$WATCHDOG_CURL_COUNT_FILE" ]; then
+      count="$(cat "$WATCHDOG_CURL_COUNT_FILE")"
     fi
-    printf "%s" "$WATCHDOG_CURL_BODY"
+    count=$((count + 1))
+    printf '%s' "$count" > "$WATCHDOG_CURL_COUNT_FILE"
+
+    if [ "$count" -eq 1 ]; then
+      if [ "${WATCHDOG_CURL_EXIT:-0}" != "0" ]; then
+        exit "$WATCHDOG_CURL_EXIT"
+      fi
+      printf "%s" "$WATCHDOG_CURL_BODY"
+      exit 0
+    fi
+
+    if [ "${WATCHDOG_CURL_READBACK_EXIT:-0}" != "0" ]; then
+      exit "$WATCHDOG_CURL_READBACK_EXIT"
+    fi
+
+    printf "%s" "${WATCHDOG_CURL_READBACK_BODY:-$WATCHDOG_CURL_BODY}"
     """
   end
 
@@ -110,6 +162,9 @@ defmodule SymphonyElixir.LaneWatchdogScriptTest do
     """
     #!/usr/bin/env bash
     printf "#{name} %s\\n" "$*" >> "$WATCHDOG_EVENTS_FILE"
+    if [ "#{name}" = "launchctl" ]; then
+      exit "${WATCHDOG_LAUNCHCTL_EXIT:-0}"
+    fi
     exit 0
     """
   end
