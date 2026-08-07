@@ -308,16 +308,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp workpad_create_input(query, variables) do
-    if String.contains?(query, "commentCreate") do
-      case variables
-           |> find_workpad_create_issue_id()
-           |> maybe_find_inline_workpad_create_issue_id(query, variables) do
-        {:ok, issue_id} -> {:ok, issue_id, comment_create_response_key(query)}
-        :ignore -> :ignore
-      end
-    else
-      :ignore
-    end
+    find_inline_workpad_create_input(query, variables)
   end
 
   defp workpad_body?(body) when is_binary(body) do
@@ -489,19 +480,6 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
       nil ->
         response
-    end
-  end
-
-  defp comment_create_response_key(query) do
-    mutation_response_key(query, "commentCreate")
-  end
-
-  defp mutation_response_key(query, mutation_name) do
-    with {:ok, after_name_index} <- next_graphql_name_match(query, mutation_name, 0),
-         name_index <- after_name_index - byte_size(mutation_name) do
-      mutation_response_key_at(query, mutation_name, name_index)
-    else
-      _ -> mutation_name
     end
   end
 
@@ -840,18 +818,6 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp reject_graphql_errors(_response, _context), do: :ok
 
-  defp find_workpad_create_issue_id(value) when is_map(value) do
-    case workpad_issue_id_from_input(value) do
-      {:ok, _issue_id} = result ->
-        result
-
-      :ignore ->
-        find_nested_workpad_create_issue_id(value)
-    end
-  end
-
-  defp find_workpad_create_issue_id(_value), do: :ignore
-
   defp workpad_update_input(query, variables) do
     case find_inline_workpad_update_input(query, variables) do
       {:ok, _comment_id, _response_key, _id_binding} = result -> result
@@ -1176,32 +1142,22 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp retarget_workpad_update_variables(value, _target_id, _canonical_id), do: value
 
-  defp find_nested_workpad_create_issue_id(value) do
-    value
-    |> Map.values()
-    |> Enum.find_value(&workpad_create_issue_id_or_nil/1) || :ignore
+  defp find_inline_workpad_create_input(query, variables) do
+    find_inline_workpad_create_input(query, variables, 0)
   end
 
-  defp workpad_create_issue_id_or_nil(value) do
-    case find_workpad_create_issue_id(value) do
-      {:ok, _issue_id} = result -> result
-      :ignore -> nil
-    end
-  end
+  defp find_inline_workpad_create_input(query, variables, index) do
+    case next_graphql_name_match(query, "commentCreate", index) do
+      {:ok, after_create_index} ->
+        name_index = after_create_index - byte_size("commentCreate")
 
-  defp maybe_find_inline_workpad_create_issue_id({:ok, _issue_id} = result, _query, _variables), do: result
-  defp maybe_find_inline_workpad_create_issue_id(:ignore, query, variables), do: find_inline_workpad_create_issue_id(query, variables)
-
-  defp find_inline_workpad_create_issue_id(query, variables) do
-    find_inline_workpad_create_issue_id(query, variables, 0)
-  end
-
-  defp find_inline_workpad_create_issue_id(query, variables, index) do
-    case next_inline_comment_create_input(query, index) do
-      {:ok, input, next_index} ->
-        case workpad_create_issue_id_from_inline_input(input, variables) do
-          {:ok, _issue_id} = result -> result
-          :ignore -> find_inline_workpad_create_issue_id(query, variables, next_index)
+        with {:ok, args} <-
+               inline_graphql_arguments(binary_part(query, after_create_index, byte_size(query) - after_create_index)),
+             {:ok, input} <- inline_graphql_input_argument(args, variables),
+             {:ok, issue_id} <- workpad_create_issue_id_from_inline_input(input, variables) do
+          {:ok, issue_id, mutation_response_key_at(query, "commentCreate", name_index)}
+        else
+          _ -> find_inline_workpad_create_input(query, variables, after_create_index)
         end
 
       :error ->
@@ -1209,18 +1165,9 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp next_inline_comment_create_input(query, index) do
-    with {:ok, after_create_index} <- next_graphql_name_match(query, "commentCreate", index) do
-      after_create = binary_part(query, after_create_index, byte_size(query) - after_create_index)
+  defp workpad_create_issue_id_from_inline_input(%{} = input, _variables), do: workpad_issue_id_from_input(input)
 
-      case inline_input_object(after_create) do
-        {:ok, input} -> {:ok, input, after_create_index}
-        :error -> next_inline_comment_create_input(query, after_create_index)
-      end
-    end
-  end
-
-  defp workpad_create_issue_id_from_inline_input(input, variables) do
+  defp workpad_create_issue_id_from_inline_input(input, variables) when is_binary(input) do
     with {:ok, body} <- inline_graphql_field(input, "body", variables),
          true <- workpad_body?(body),
          {:ok, issue_id} <- inline_graphql_field(input, "issueId", variables),
@@ -1228,15 +1175,6 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
       {:ok, issue_id}
     else
       _ -> :ignore
-    end
-  end
-
-  defp inline_input_object(value) do
-    with [{input_start, input_size}] <- Regex.run(~r/^\s*\(\s*input\s*:\s*\{/s, value, return: :index),
-         object_start <- input_start + input_size do
-      take_balanced_graphql_object(value, object_start)
-    else
-      _ -> :error
     end
   end
 

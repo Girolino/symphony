@@ -1178,6 +1178,69 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["newer-workpad"]
   end
 
+  test "linear_graphql compound workpad creates use the matched field response key" do
+    table = :ets.new(:workpad_bootstrap_guard_compound_create_key, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    create =
+      compound_aliased_workpad_create_args("## Codex Workpad\n\nloser")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "bootstrap", "comment", "id"]) == "newer-workpad"
+    assert get_in(create, ["data", "bootstrap", "reusedExistingWorkpad"]) == true
+    assert get_in(create, ["data", "bootstrap", "resolvedDuplicateIds"]) == ["older-workpad"]
+    refute get_in(create, ["data", "decoy", "comment"])
+    assert count_workpad_calls(table, :comment_create) == 0
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql compound workpad creates skip non-workpad variable inputs" do
+    table = :ets.new(:workpad_bootstrap_guard_compound_non_workpad_create, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    create =
+      compound_variable_workpad_create_args("## Codex Workpad\n\nloser")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "bootstrap", "comment", "id"]) == "newer-workpad"
+    assert get_in(create, ["data", "bootstrap", "resolvedDuplicateIds"]) == ["older-workpad"]
+    refute get_in(create, ["data", "decoy", "comment"])
+    assert count_workpad_calls(table, :comment_create) == 0
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
   test "linear_graphql workpad updates redirect superseded duplicates to the canonical active workpad" do
     table = :ets.new(:workpad_bootstrap_guard_duplicate_update, [:public])
 
@@ -2883,6 +2946,22 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert non_binary_body["success"] == true
     assert_received {:unguarded_create, _query, %{"body" => 42, "issueId" => "issue-workpad-race"}, []}
+
+    missing_input =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation CreateWorkpad { commentCreate(body: \"## Codex Workpad\\n\\nmissing input\") { success } }",
+          "variables" => %{}
+        },
+        linear_client: fn query, variables, opts ->
+          send(test_pid, {:unguarded_create, query, variables, opts})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+        end
+      )
+
+    assert missing_input["success"] == true
+    assert_received {:unguarded_create, _query, %{}, []}
   end
 
   test "linear_graphql workpad create fails closed when active lookup fails before create" do
@@ -3234,6 +3313,61 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       }
       """,
       "variables" => %{"input" => %{"issueId" => issue_id, "body" => body}}
+    }
+  end
+
+  defp compound_aliased_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($input: CommentCreateInput!) {
+        decoy: commentCreate(input: {issueId: "issue-other", body: "regular comment"}) {
+          success
+          comment {
+            id
+          }
+        }
+        bootstrap: commentCreate(input: $input) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{"input" => %{"issueId" => issue_id, "body" => body}}
+    }
+  end
+
+  defp compound_variable_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($regularInput: CommentCreateInput!, $workpadInput: CommentCreateInput!) {
+        decoy: commentCreate(input: $regularInput) {
+          success
+          comment {
+            id
+          }
+        }
+        bootstrap: commentCreate(input: $workpadInput) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{
+        "regularInput" => %{"issueId" => "issue-other", "body" => "regular comment"},
+        "workpadInput" => %{"issueId" => issue_id, "body" => body}
+      }
     }
   end
 
