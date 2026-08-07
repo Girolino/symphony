@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
         nodes {
           id
           body
+          issueId
           resolvedAt
           createdAt
           updatedAt
@@ -44,6 +45,10 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     comment(id: $id) {
       id
       body
+      issueId
+      issue {
+        id
+      }
       resolvedAt
       createdAt
       updatedAt
@@ -69,49 +74,61 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   def execute(query, variables, linear_client)
       when is_binary(query) and is_map(variables) and is_function(linear_client, 3) do
     case workpad_create_input(query, variables) do
-      {:ok, issue_id} ->
-        with_issue_lock(issue_id, fn -> create_or_reuse_workpad(query, variables, linear_client, issue_id) end)
+      {:ok, issue_id, response_key} ->
+        with_issue_lock(issue_id, fn ->
+          create_or_reuse_workpad(query, variables, linear_client, issue_id, response_key)
+        end)
+
+      :ignore ->
+        execute_non_create(query, variables, linear_client)
+    end
+  end
+
+  defp execute_non_create(query, variables, linear_client) do
+    case workpad_update_input(query, variables) do
+      {:ok, comment_id, response_key} ->
+        update_or_reuse_workpad(query, variables, linear_client, comment_id, response_key)
 
       :ignore ->
         linear_client.(query, variables, [])
     end
   end
 
-  defp create_or_reuse_workpad(query, variables, linear_client, issue_id) do
+  defp create_or_reuse_workpad(query, variables, linear_client, issue_id, response_key) do
     with {:ok, comments} <- fetch_workpad_comments(linear_client, issue_id) do
-      create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id)
+      create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id, response_key)
     end
   end
 
-  defp create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id) do
+  defp create_or_reuse_workpad_from_comments(comments, query, variables, linear_client, issue_id, response_key) do
     case Enum.filter(comments, &active_workpad_comment?/1) do
-      [] -> reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id)
-      active_comments -> reuse_active_workpad(linear_client, issue_id, active_comments)
+      [] -> reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id, response_key)
+      active_comments -> reuse_active_workpad(linear_client, issue_id, active_comments, response_key)
     end
   end
 
-  defp reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id) do
+  defp reuse_cached_or_create_workpad(comments, query, variables, linear_client, issue_id, response_key) do
     case read_recent_workpad_cache(issue_id, comments, linear_client) do
-      {:ok, comment} -> {:ok, reuse_response(comment, [])}
+      {:ok, comment} -> {:ok, reuse_response(comment, [], response_key)}
       {:error, reason} -> {:error, reason}
-      :miss -> create_workpad(query, variables, linear_client, issue_id)
+      :miss -> create_workpad(query, variables, linear_client, issue_id, response_key)
     end
   end
 
-  defp reuse_active_workpad(linear_client, issue_id, active_comments) do
+  defp reuse_active_workpad(linear_client, issue_id, active_comments, response_key) do
     canonical = newest_comment(active_comments)
 
     with {:ok, resolved_ids} <- resolve_duplicate_workpads(linear_client, active_comments, canonical) do
       write_recent_workpad_cache(issue_id, canonical)
-      {:ok, reuse_response(canonical, resolved_ids)}
+      {:ok, reuse_response(canonical, resolved_ids, response_key)}
     end
   end
 
-  defp create_workpad(query, variables, linear_client, issue_id) do
+  defp create_workpad(query, variables, linear_client, issue_id, response_key) do
     with {:ok, response} <- linear_client.(query, variables, []) do
-      case comment_create_success?(response) do
+      case comment_create_success?(response, response_key) do
         true ->
-          {:ok, maybe_attach_active_workpad(response, linear_client, issue_id)}
+          {:ok, maybe_attach_active_workpad(response, linear_client, issue_id, response_key)}
 
         false ->
           {:ok, response}
@@ -119,10 +136,114 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp maybe_attach_active_workpad(response, linear_client, issue_id) do
+  defp update_or_reuse_workpad(query, variables, linear_client, comment_id, response_key) do
+    with {:ok, %{} = target_comment} <- fetch_workpad_comment(linear_client, comment_id),
+         true <- workpad_comment?(target_comment),
+         {:ok, issue_id} <- workpad_comment_issue_id(target_comment) do
+      with_issue_lock(issue_id, fn ->
+        update_or_reuse_workpad_locked(query, variables, linear_client, issue_id, target_comment, response_key)
+      end)
+    else
+      {:ok, nil} ->
+        {:error, {:workpad_update_target_not_found, comment_id}}
+
+      {:ok, _comment} ->
+        linear_client.(query, variables, [])
+
+      {:error, reason} ->
+        {:error, reason}
+
+      false ->
+        linear_client.(query, variables, [])
+    end
+  end
+
+  defp update_or_reuse_workpad_locked(query, variables, linear_client, issue_id, target_comment, response_key) do
+    with {:ok, comments} <- fetch_workpad_comments(linear_client, issue_id) do
+      update_or_reuse_workpad_from_comments(
+        comments,
+        query,
+        variables,
+        linear_client,
+        issue_id,
+        target_comment,
+        response_key
+      )
+    end
+  end
+
+  defp update_or_reuse_workpad_from_comments(
+         comments,
+         query,
+         variables,
+         linear_client,
+         issue_id,
+         target_comment,
+         response_key
+       ) do
+    case Enum.filter(comments, &active_workpad_comment?/1) do
+      [] ->
+        update_visible_target_workpad(query, variables, linear_client, issue_id, target_comment, response_key)
+
+      active_comments ->
+        update_canonical_workpad(
+          query,
+          variables,
+          linear_client,
+          issue_id,
+          target_comment,
+          active_comments,
+          response_key
+        )
+    end
+  end
+
+  defp update_visible_target_workpad(query, variables, linear_client, issue_id, target_comment, response_key) do
+    if active_workpad_comment?(target_comment) do
+      update_workpad(query, variables, linear_client, issue_id, target_comment, false, [], response_key)
+    else
+      {:error, {:workpad_update_target_not_active, map_get(target_comment, "id")}}
+    end
+  end
+
+  defp update_canonical_workpad(query, variables, linear_client, issue_id, target_comment, active_comments, response_key) do
+    canonical = newest_comment(active_comments)
+
+    with {:ok, resolved_ids} <- resolve_duplicate_workpads(linear_client, active_comments, canonical) do
+      canonical_id = map_get(canonical, "id")
+      target_id = map_get(target_comment, "id")
+      redirected? = is_binary(canonical_id) and canonical_id != target_id
+      updated_variables = maybe_retarget_workpad_update_variables(variables, redirected?, target_id, canonical_id)
+
+      update_workpad(
+        query,
+        updated_variables,
+        linear_client,
+        issue_id,
+        canonical,
+        redirected?,
+        resolved_ids,
+        response_key
+      )
+    end
+  end
+
+  defp update_workpad(query, variables, linear_client, issue_id, fallback_comment, redirected?, resolved_ids, response_key) do
+    with {:ok, response} <- linear_client.(query, variables, []) do
+      if comment_update_success?(response, response_key) do
+        comment = comment_update_comment(response, response_key) || fallback_comment
+        write_recent_workpad_cache(issue_id, comment)
+        {:ok, put_comment_update(response, comment, redirected?, resolved_ids, response_key)}
+      else
+        {:ok, response}
+      end
+    end
+  end
+
+  defp maybe_attach_active_workpad(response, linear_client, issue_id, response_key) do
     case fetch_workpad_comments(linear_client, issue_id) do
       {:ok, comments} ->
-        maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments)
+        maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments, response_key)
 
       other ->
         Logger.warning(
@@ -130,24 +251,24 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
             "issue_id=#{issue_id} reason=#{inspect(other)}"
         )
 
-        cache_created_workpad_from_response(response, issue_id)
+        cache_created_workpad_from_response(response, issue_id, response_key)
     end
   end
 
-  defp maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments) do
+  defp maybe_attach_workpad_from_comments(response, linear_client, issue_id, comments, response_key) do
     case Enum.filter(comments, &active_workpad_comment?/1) do
-      [] -> cache_created_workpad_from_response(response, issue_id)
-      active_comments -> attach_active_workpad(response, linear_client, issue_id, active_comments)
+      [] -> cache_created_workpad_from_response(response, issue_id, response_key)
+      active_comments -> attach_active_workpad(response, linear_client, issue_id, active_comments, response_key)
     end
   end
 
-  defp attach_active_workpad(response, linear_client, issue_id, active_comments) do
+  defp attach_active_workpad(response, linear_client, issue_id, active_comments, response_key) do
     canonical = newest_comment(active_comments)
 
     case resolve_duplicate_workpads(linear_client, active_comments, canonical) do
       {:ok, resolved_ids} ->
         write_recent_workpad_cache(issue_id, canonical)
-        put_comment_create(response, canonical, false, resolved_ids)
+        put_comment_create(response, canonical, false, resolved_ids, response_key)
 
       {:error, _reason} ->
         response
@@ -165,9 +286,12 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp workpad_create_input(query, variables) do
     if String.contains?(query, "commentCreate") do
-      variables
-      |> find_workpad_create_issue_id()
-      |> maybe_find_inline_workpad_create_issue_id(query, variables)
+      case variables
+           |> find_workpad_create_issue_id()
+           |> maybe_find_inline_workpad_create_issue_id(query, variables) do
+        {:ok, issue_id} -> {:ok, issue_id, comment_create_response_key(query)}
+        :ignore -> :ignore
+      end
     else
       :ignore
     end
@@ -189,6 +313,13 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp active_workpad_comment?(%{} = comment) do
     workpad_body?(map_get(comment, "body")) and is_nil(map_get(comment, "resolvedAt"))
+  end
+
+  defp workpad_comment_issue_id(%{} = comment) do
+    case map_get(comment, "issueId") || comment |> map_get("issue") |> map_get("id") do
+      issue_id when is_binary(issue_id) and issue_id != "" -> {:ok, issue_id}
+      _ -> {:error, {:workpad_update_missing_issue_id, map_get(comment, "id")}}
+    end
   end
 
   defp newest_comment(comments) do
@@ -248,17 +379,17 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp comment_create_success?(response) do
+  defp comment_create_success?(response, response_key) do
     response
     |> map_get("data")
-    |> map_get("commentCreate")
+    |> map_get(response_key)
     |> map_get("success") == true
   end
 
-  defp comment_create_comment(response) do
+  defp comment_create_comment(response, response_key) do
     response
     |> map_get("data")
-    |> map_get("commentCreate")
+    |> map_get(response_key)
     |> map_get("comment")
     |> case do
       %{} = comment -> comment
@@ -266,10 +397,28 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
-  defp reuse_response(comment, resolved_ids) do
+  defp comment_update_success?(response, response_key) do
+    response
+    |> map_get("data")
+    |> map_get(response_key)
+    |> map_get("success") == true
+  end
+
+  defp comment_update_comment(response, response_key) do
+    response
+    |> map_get("data")
+    |> map_get(response_key)
+    |> map_get("comment")
+    |> case do
+      %{} = comment -> comment
+      _ -> nil
+    end
+  end
+
+  defp reuse_response(comment, resolved_ids, response_key) do
     %{
       "data" => %{
-        "commentCreate" => %{
+        response_key => %{
           "success" => true,
           "comment" => comment,
           "reusedExistingWorkpad" => true,
@@ -279,9 +428,9 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     }
   end
 
-  defp put_comment_create(response, comment, reused?, resolved_ids) when is_map(response) do
+  defp put_comment_create(response, comment, reused?, resolved_ids, response_key) when is_map(response) do
     data = map_get(response, "data") || %{}
-    comment_create = map_get(data, "commentCreate") || %{}
+    comment_create = map_get(data, response_key) || %{}
 
     updated_comment_create =
       comment_create
@@ -291,17 +440,63 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
       |> Map.put("resolvedDuplicateIds", resolved_ids)
 
     response
-    |> Map.put("data", Map.put(data, "commentCreate", updated_comment_create))
+    |> Map.put("data", Map.put(data, response_key, updated_comment_create))
   end
 
-  defp cache_created_workpad_from_response(response, issue_id) do
-    case comment_create_comment(response) do
+  defp put_comment_update(response, comment, redirected?, resolved_ids, response_key) when is_map(response) do
+    data = map_get(response, "data") || %{}
+    comment_update = map_get(data, response_key) || %{}
+
+    updated_comment_update =
+      comment_update
+      |> Map.put("success", true)
+      |> Map.put("comment", comment)
+      |> Map.put("reusedExistingWorkpad", redirected?)
+      |> Map.put("resolvedDuplicateIds", resolved_ids)
+
+    response
+    |> Map.put("data", Map.put(data, response_key, updated_comment_update))
+  end
+
+  defp cache_created_workpad_from_response(response, issue_id, response_key) do
+    case comment_create_comment(response, response_key) do
       %{} = comment ->
         write_recent_workpad_cache(issue_id, comment)
-        put_comment_create(response, comment, false, [])
+        put_comment_create(response, comment, false, [], response_key)
 
       nil ->
         response
+    end
+  end
+
+  defp comment_create_response_key(query) do
+    mutation_response_key(query, "commentCreate")
+  end
+
+  defp comment_update_response_key(query) do
+    mutation_response_key(query, "commentUpdate")
+  end
+
+  defp mutation_response_key(query, mutation_name) do
+    with {:ok, after_name_index} <- next_graphql_name_match(query, mutation_name, 0),
+         name_index <- after_name_index - byte_size(mutation_name),
+         {:ok, alias} <- graphql_alias_before(query, name_index) do
+      alias
+    else
+      _ -> mutation_name
+    end
+  end
+
+  defp graphql_alias_before(value, name_index) do
+    with colon_index when colon_index >= 0 <- skip_graphql_ignored_backward(value, name_index - 1),
+         ?: <- :binary.at(value, colon_index),
+         alias_end when alias_end >= 0 <- skip_graphql_ignored_backward(value, colon_index - 1),
+         alias_start <- graphql_name_start(value, alias_end),
+         true <- alias_start <= alias_end,
+         true <- graphql_name_start_byte?(:binary.at(value, alias_start)) do
+      {:ok, binary_part(value, alias_start, alias_end - alias_start + 1)}
+    else
+      _ -> :error
     end
   end
 
@@ -586,7 +781,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp recent_workpad_cache_comment(comment) do
-    ["id", "body", "resolvedAt", "createdAt", "updatedAt", "url"]
+    ["id", "body", "issueId", "resolvedAt", "createdAt", "updatedAt", "url"]
     |> Enum.reduce(%{}, fn key, acc ->
       case map_get(comment, key) do
         nil -> acc
@@ -621,6 +816,94 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   end
 
   defp find_workpad_create_issue_id(_value), do: :ignore
+
+  defp workpad_update_input(query, variables) do
+    if String.contains?(query, "commentUpdate") do
+      case find_workpad_update_comment_id(variables) do
+        {:ok, comment_id} -> {:ok, comment_id, comment_update_response_key(query)}
+        :ignore -> :ignore
+      end
+    else
+      :ignore
+    end
+  end
+
+  defp find_workpad_update_comment_id(variables) when is_map(variables) do
+    with {:ok, _body} <- find_workpad_update_body(variables),
+         {:ok, comment_id} <- find_comment_update_id(variables) do
+      {:ok, comment_id}
+    else
+      _ -> :ignore
+    end
+  end
+
+  defp find_workpad_update_body(value) when is_map(value) do
+    case map_get(value, "body") do
+      body when is_binary(body) ->
+        if workpad_body?(body) do
+          {:ok, body}
+        else
+          find_nested_workpad_update_body(value)
+        end
+
+      _ ->
+        find_nested_workpad_update_body(value)
+    end
+  end
+
+  defp find_workpad_update_body(_value), do: :ignore
+
+  defp find_nested_workpad_update_body(value) do
+    value
+    |> Map.values()
+    |> Enum.find_value(&find_workpad_update_body_or_nil/1) || :ignore
+  end
+
+  defp find_workpad_update_body_or_nil(value) do
+    case find_workpad_update_body(value) do
+      {:ok, _body} = result -> result
+      :ignore -> nil
+    end
+  end
+
+  defp find_comment_update_id(value) when is_map(value) do
+    case map_get(value, "id") do
+      id when is_binary(id) and id != "" ->
+        {:ok, id}
+
+      _ ->
+        value
+        |> Map.values()
+        |> Enum.find_value(&find_comment_update_id_or_nil/1) || :ignore
+    end
+  end
+
+  defp find_comment_update_id(_value), do: :ignore
+
+  defp find_comment_update_id_or_nil(value) do
+    case find_comment_update_id(value) do
+      {:ok, _id} = result -> result
+      :ignore -> nil
+    end
+  end
+
+  defp maybe_retarget_workpad_update_variables(variables, false, _target_id, _canonical_id), do: variables
+
+  defp maybe_retarget_workpad_update_variables(variables, true, target_id, canonical_id) do
+    retarget_workpad_update_variables(variables, target_id, canonical_id)
+  end
+
+  defp retarget_workpad_update_variables(value, target_id, canonical_id) when is_map(value) do
+    Map.new(value, fn
+      {key, ^target_id} when key in ["id", :id] ->
+        {key, canonical_id}
+
+      {key, nested_value} ->
+        {key, retarget_workpad_update_variables(nested_value, target_id, canonical_id)}
+    end)
+  end
+
+  defp retarget_workpad_update_variables(value, _target_id, _canonical_id), do: value
 
   defp find_nested_workpad_create_issue_id(value) do
     value
@@ -883,6 +1166,16 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
     end
   end
 
+  defp skip_graphql_ignored_backward(_value, index) when index < 0, do: index
+
+  defp skip_graphql_ignored_backward(value, index) do
+    if graphql_ignored_byte?(:binary.at(value, index)) do
+      skip_graphql_ignored_backward(value, index - 1)
+    else
+      index
+    end
+  end
+
   defp parse_graphql_name(value, index) do
     cond do
       index >= byte_size(value) ->
@@ -900,6 +1193,14 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   defp graphql_name_end(value, index) do
     if index < byte_size(value) and graphql_name_byte?(:binary.at(value, index)) do
       graphql_name_end(value, index + 1)
+    else
+      index
+    end
+  end
+
+  defp graphql_name_start(value, index) do
+    if index > 0 and graphql_name_byte?(:binary.at(value, index - 1)) do
+      graphql_name_start(value, index - 1)
     else
       index
     end
