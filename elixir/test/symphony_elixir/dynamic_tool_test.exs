@@ -1787,6 +1787,102 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert get_in(update, ["data", "saved", "comment", "id"]) == "newer-workpad"
   end
 
+  test "linear_graphql workpad updates skip regular updates before workpad updates" do
+    table = :ets.new(:workpad_bootstrap_guard_update_after_regular_update, [:public])
+
+    insert_workpad_comment(table, "regular-comment", %{
+      "body" => "regular comment",
+      "createdAt" => "2026-08-07T12:01:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:01:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder compound update",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer compound update",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($regularId: String!, $regularBody: String!, $id: String!, $body: String!) {
+          regular: commentUpdate(id: $regularId, input: {body: $regularBody}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+          saved: commentUpdate(id: $id, input: {body: $body}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{
+          "regularId" => "regular-comment",
+          "regularBody" => "regular update",
+          "id" => "older-workpad",
+          "body" => "## Codex Workpad\n\ncompound update"
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+
+          id = Map.fetch!(variables, "id")
+          body = Map.fetch!(variables, "body")
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", body)
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok,
+           %{
+             "data" => %{
+               "regular" => %{"success" => true},
+               "saved" => %{"success" => true, "comment" => comment}
+             }
+           }}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "newer-workpad"
+    assert lookup_workpad_comment(table, "older-workpad")["body"] == "## Codex Workpad\n\nolder compound update"
+    assert lookup_workpad_comment(table, "newer-workpad")["body"] == "## Codex Workpad\n\ncompound update"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{
+               "regularId" => "regular-comment",
+               "regularBody" => "regular update",
+               "id" => "newer-workpad",
+               "body" => "## Codex Workpad\n\ncompound update"
+             }
+           ]
+  end
+
   test "linear_graphql workpad creates use default response key when mutation names are ignored" do
     table = :ets.new(:workpad_bootstrap_guard_ignored_create_name, [:public])
 

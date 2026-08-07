@@ -895,10 +895,7 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
   defp comment_update_id_from_value(%{} = value), do: find_comment_update_id(value)
 
   defp inline_comment_update_body(args, variables) do
-    case inline_graphql_input_body(args, variables) do
-      {:ok, _body} = result -> result
-      :ignore -> find_workpad_update_body(variables)
-    end
+    inline_graphql_input_body(args, variables)
   end
 
   defp inline_graphql_input_body(args, variables) do
@@ -1012,30 +1009,11 @@ defmodule SymphonyElixir.Codex.WorkpadBootstrapGuard do
 
   defp find_workpad_update_body(value) when is_map(value) do
     case map_get(value, "body") do
-      body when is_binary(body) ->
-        if workpad_body?(body) do
-          {:ok, body}
-        else
-          find_nested_workpad_update_body(value)
-        end
+      body when is_binary(body) and body != "" ->
+        if workpad_body?(body), do: {:ok, body}, else: :ignore
 
       _ ->
-        find_nested_workpad_update_body(value)
-    end
-  end
-
-  defp find_workpad_update_body(_value), do: :ignore
-
-  defp find_nested_workpad_update_body(value) do
-    value
-    |> Map.values()
-    |> Enum.find_value(&find_workpad_update_body_or_nil/1) || :ignore
-  end
-
-  defp find_workpad_update_body_or_nil(value) do
-    case find_workpad_update_body(value) do
-      {:ok, _body} = result -> result
-      :ignore -> nil
+        :ignore
     end
   end
 
