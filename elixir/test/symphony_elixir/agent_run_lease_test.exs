@@ -6,21 +6,57 @@ defmodule SymphonyElixir.AgentRunLeaseTest do
   defmodule WorkpadRaceLinearClient do
     @spec graphql(String.t(), map(), keyword()) :: {:ok, map()}
     def graphql(query, variables, _opts) do
-      if String.contains?(query, "commentCreate") do
-        table = Application.fetch_env!(:symphony_elixir, :workpad_race_table)
-        sequence = :ets.update_counter(table, {:comment_create_count}, {2, 1}, {{:comment_create_count}, 0})
+      table = Application.fetch_env!(:symphony_elixir, :workpad_race_table)
 
-        :ets.insert(table, {
-          {:comment_create, System.unique_integer([:positive, :monotonic])},
-          variables
-        })
+      cond do
+        String.contains?(query, "commentCreate") ->
+          handle_comment_create(table, variables)
 
-        maybe_block_first_comment_create(sequence)
+        String.contains?(query, "comments") ->
+          {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => workpad_comments(table)}}}}}
 
-        {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
-      else
-        {:ok, %{"data" => %{}}}
+        true ->
+          {:ok, %{"data" => %{}}}
       end
+    end
+
+    defp handle_comment_create(table, variables) do
+      sequence = :ets.update_counter(table, {:comment_create_count}, {2, 1}, {{:comment_create_count}, 0})
+      id = "workpad-#{sequence}"
+
+      comment = %{
+        "id" => id,
+        "body" => Map.fetch!(variables, "body"),
+        "issueId" => Map.fetch!(variables, "issueId"),
+        "createdAt" => timestamp(sequence),
+        "updatedAt" => timestamp(sequence),
+        "resolvedAt" => nil,
+        "url" => "https://linear.example/#{id}"
+      }
+
+      :ets.insert(table, {
+        {:comment_create, System.unique_integer([:positive, :monotonic])},
+        variables
+      })
+
+      :ets.insert(table, {{:comment, id}, comment})
+
+      maybe_block_first_comment_create(sequence)
+
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => comment}}}}
+    end
+
+    defp workpad_comments(table) do
+      table
+      |> :ets.tab2list()
+      |> Enum.flat_map(fn
+        {{:comment, _id}, comment} -> [comment]
+        _entry -> []
+      end)
+    end
+
+    defp timestamp(sequence) do
+      "2026-07-24T12:00:#{sequence |> Integer.to_string() |> String.pad_leading(2, "0")}Z"
     end
 
     defp maybe_block_first_comment_create(1) do
@@ -591,8 +627,15 @@ defmodule SymphonyElixir.AgentRunLeaseTest do
                 }}
              ] = comment_creates
 
-      trace_lines = trace_file |> File.read!() |> String.split("\n", trim: true)
-      assert length(Enum.filter(trace_lines, &String.starts_with?(&1, "RUN:"))) == 1
+      active_workpads =
+        table
+        |> :ets.tab2list()
+        |> Enum.flat_map(fn
+          {{:comment, _id}, %{"resolvedAt" => nil} = comment} -> [comment]
+          _entry -> []
+        end)
+
+      assert Enum.map(active_workpads, & &1["id"]) == ["workpad-1"]
     after
       System.delete_env("SYMPHONY_WORKPAD_RACE_TRACE")
       System.delete_env("SYMPHONY_WORKPAD_RACE_ALLOW_TOOL")

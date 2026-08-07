@@ -452,6 +452,73 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert active_workpad_ids(table) == ["workpad-1"]
   end
 
+  test "linear_graphql aliased workpad creates converge when Linear hides newly created comments" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workpad-hidden-aliased-create-#{System.unique_integer([:positive])}"
+      )
+
+    table = :ets.new(:workpad_bootstrap_guard_hidden_aliased_create, [:public])
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    client = stale_aliased_create_workpad_linear_client(table)
+
+    results =
+      1..2
+      |> Enum.map(fn index ->
+        Task.async(fn ->
+          create =
+            "## Codex Workpad\n\naliased while hidden #{index}"
+            |> aliased_workpad_create_args()
+            |> execute_with_client(client)
+            |> output()
+
+          id = get_in(create, ["data", "bootstrap", "comment", "id"])
+
+          update =
+            workpad_update_args(id, "## Codex Workpad\n\naliased update #{index}")
+            |> execute_with_client(client)
+            |> output()
+
+          {create, update}
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.map(results, fn {create, _update} -> get_in(create, ["data", "bootstrap", "comment", "id"]) end) ==
+             ["workpad-1", "workpad-1"]
+
+    assert count_workpad_calls(table, :comment_create) == 1
+    assert count_workpad_calls(table, :comment_update) == 2
+    assert workpad_call_variables(table, :comment_update) |> Enum.map(&Map.fetch!(&1, "id")) == ["workpad-1", "workpad-1"]
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad create preserves success when hidden create returns no comment" do
+    response =
+      "## Codex Workpad\n\nhidden no returned comment"
+      |> workpad_create_args()
+      |> execute_with_client(fn query, _variables, _opts ->
+        cond do
+          String.contains?(query, "commentCreate") ->
+            {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+
+          String.contains?(query, "comments") ->
+            {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => nil}}}}}
+        end
+      end)
+      |> output()
+
+    assert get_in(response, ["data", "commentCreate", "success"]) == true
+    refute get_in(response, ["data", "commentCreate", "comment"])
+  end
+
   test "linear_graphql workpad creates converge after two kickoff sessions both start empty" do
     workspace_root =
       Path.join(
@@ -1078,6 +1145,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     insert_workpad_comment(table, "older-workpad", %{
       "body" => "## Codex Workpad\n\nolder",
       "createdAt" => "2026-07-24T12:00:00Z",
+      "issueId" => "issue-workpad-race",
       "updatedAt" => "2026-07-24T12:00:00Z",
       "resolvedAt" => nil
     })
@@ -1085,6 +1153,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     insert_workpad_comment(table, "newer-workpad", %{
       "body" => "## Codex Workpad\n\nnewer",
       "createdAt" => "2026-07-24T12:00:10Z",
+      "issueId" => "issue-workpad-race",
       "updatedAt" => "2026-07-24T12:00:10Z",
       "resolvedAt" => nil
     })
@@ -1106,6 +1175,1426 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert get_in(create, ["data", "commentCreate", "resolvedDuplicateIds"]) == ["older-workpad"]
     assert count_workpad_calls(table, :comment_create) == 0
     assert count_workpad_calls(table, :comment_resolve) == 1
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql compound workpad creates use the matched field response key" do
+    table = :ets.new(:workpad_bootstrap_guard_compound_create_key, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    create =
+      compound_aliased_workpad_create_args("## Codex Workpad\n\nloser")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "bootstrap", "comment", "id"]) == "newer-workpad"
+    assert get_in(create, ["data", "bootstrap", "reusedExistingWorkpad"]) == true
+    assert get_in(create, ["data", "bootstrap", "resolvedDuplicateIds"]) == ["older-workpad"]
+    refute get_in(create, ["data", "decoy", "comment"])
+    assert count_workpad_calls(table, :comment_create) == 0
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql compound workpad creates skip non-workpad variable inputs" do
+    table = :ets.new(:workpad_bootstrap_guard_compound_non_workpad_create, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    create =
+      compound_variable_workpad_create_args("## Codex Workpad\n\nloser")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(create, ["data", "bootstrap", "comment", "id"]) == "newer-workpad"
+    assert get_in(create, ["data", "bootstrap", "resolvedDuplicateIds"]) == ["older-workpad"]
+    refute get_in(create, ["data", "decoy", "comment"])
+    assert count_workpad_calls(table, :comment_create) == 0
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql workpad updates redirect superseded duplicates to the canonical active workpad" do
+    table = :ets.new(:workpad_bootstrap_guard_duplicate_update, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder incomplete plan",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer canonical gate evidence",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "older-workpad"
+      |> workpad_update_args("## Codex Workpad\n\nloser session update")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+    assert get_in(update, ["data", "commentUpdate", "comment", "body"]) == "## Codex Workpad\n\nloser session update"
+
+    assert lookup_workpad_comment(table, "older-workpad")["body"] == "## Codex Workpad\n\nolder incomplete plan"
+    assert lookup_workpad_comment(table, "older-workpad")["resolvedAt"] == "2026-07-24T12:59:00Z"
+    assert lookup_workpad_comment(table, "newer-workpad")["body"] == "## Codex Workpad\n\nloser session update"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{"body" => "## Codex Workpad\n\nloser session update", "id" => "newer-workpad"}
+           ]
+
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql aliased workpad updates redirect superseded duplicates" do
+    table = :ets.new(:workpad_bootstrap_guard_aliased_duplicate_update, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder aliased plan",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer aliased evidence",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "older-workpad"
+      |> aliased_workpad_update_args("## Codex Workpad\n\naliased loser update")
+      |> execute_with_client(aliased_workpad_update_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "newer-workpad"
+    assert get_in(update, ["data", "saved", "reusedExistingWorkpad"]) == true
+    assert get_in(update, ["data", "saved", "resolvedDuplicateIds"]) == ["older-workpad"]
+    assert active_workpad_ids(table) == ["newer-workpad"]
+  end
+
+  test "linear_graphql workpad updates parse id and body variables from mutation arguments" do
+    table = :ets.new(:workpad_bootstrap_guard_update_bound_variables, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder bound variable",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer bound variable",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($commentId: String!, $content: String!) {
+          commentUpdate(id: $commentId, input: {body: $content}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{
+          "commentId" => "older-workpad",
+          "content" => "## Codex Workpad\n\nbound variable update"
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+          id = Map.fetch!(variables, "commentId")
+          body = Map.fetch!(variables, "content")
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", body)
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+    assert lookup_workpad_comment(table, "older-workpad")["body"] == "## Codex Workpad\n\nolder bound variable"
+    assert lookup_workpad_comment(table, "newer-workpad")["body"] == "## Codex Workpad\n\nbound variable update"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{
+               "commentId" => "newer-workpad",
+               "content" => "## Codex Workpad\n\nbound variable update"
+             }
+           ]
+  end
+
+  test "linear_graphql workpad updates retarget literal mutation ids" do
+    table = :ets.new(:workpad_bootstrap_guard_update_literal_id, [:public])
+    test_pid = self()
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder literal id",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer literal id",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($body: String!) {
+          commentUpdate(id: "older-workpad", input: {body: $body}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{"body" => "## Codex Workpad\n\nliteral id update"}
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          send(test_pid, {:literal_update_query, query})
+          record_workpad_call(table, :comment_update, variables)
+
+          id =
+            cond do
+              query =~ ~r/commentUpdate\s*\(\s*id:\s*"newer-workpad"/ -> "newer-workpad"
+              query =~ ~r/commentUpdate\s*\(\s*id:\s*"older-workpad"/ -> "older-workpad"
+            end
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", Map.fetch!(variables, "body"))
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert_received {:literal_update_query, query}
+    assert query =~ ~r/commentUpdate\s*\(\s*id:\s*"newer-workpad"/
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+    assert lookup_workpad_comment(table, "older-workpad")["body"] == "## Codex Workpad\n\nolder literal id"
+    assert lookup_workpad_comment(table, "newer-workpad")["body"] == "## Codex Workpad\n\nliteral id update"
+  end
+
+  test "linear_graphql workpad updates retarget atom-key variable bindings" do
+    table = :ets.new(:workpad_bootstrap_guard_update_atom_variables, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder atom variable",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer atom variable",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        query: """
+        mutation UpdateWorkpad($commentId: String!, $content: String!) {
+          commentUpdate(id: $commentId, input: {body: $content}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        variables: %{
+          commentId: "older-workpad",
+          content: "## Codex Workpad\n\natom variable update"
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+          id = Map.fetch!(variables, :commentId)
+          body = Map.fetch!(variables, :content)
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", body)
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{
+               commentId: "newer-workpad",
+               content: "## Codex Workpad\n\natom variable update"
+             }
+           ]
+  end
+
+  test "linear_graphql workpad updates retarget duplicate input object variables" do
+    table = :ets.new(:workpad_bootstrap_guard_update_input_object_redirect, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder input object",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer input object",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "older-workpad"
+      |> nested_input_workpad_update_args("## Codex Workpad\n\ninput object update")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{
+               "id" => "newer-workpad",
+               "input" => %{"body" => "## Codex Workpad\n\ninput object update"}
+             }
+           ]
+  end
+
+  test "linear_graphql workpad updates retarget block string literal mutation ids" do
+    table = :ets.new(:workpad_bootstrap_guard_update_block_literal_id, [:public])
+    test_pid = self()
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder block literal",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer block literal",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => ~S'''
+        mutation UpdateWorkpad {
+          commentUpdate(
+            id: """older-workpad"""
+            # ignored while scanning arguments
+            input: {body: """## Codex Workpad
+
+        block literal update"""}
+          ) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        ''',
+        "variables" => %{}
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          send(test_pid, {:block_literal_update_query, query})
+          record_workpad_call(table, :comment_update, variables)
+
+          comment =
+            table
+            |> lookup_workpad_comment("newer-workpad")
+            |> Map.put("body", "## Codex Workpad\n\nblock literal update")
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, "newer-workpad"}, comment})
+
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert_received {:block_literal_update_query, query}
+    assert query =~ ~r/commentUpdate\s*\(\s*id:\s*"newer-workpad"/
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+  end
+
+  test "linear_graphql workpad updates skip malformed inline update shapes" do
+    test_pid = self()
+
+    args = [
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $body: String!) {
+          commentUpdate id: $id, input: {body: $body}
+        }
+        """,
+        "variables" => %{"id" => "workpad-1", "body" => "## Codex Workpad\n\nmissing parens"}
+      },
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $body: String!) {
+          commentUpdate(id $id, input: {body: $body}) {
+            success
+          }
+        }
+        """,
+        "variables" => %{"id" => "workpad-1", "body" => "## Codex Workpad\n\nmissing id colon"}
+      },
+      %{
+        "query" => """
+        mutation UpdateWorkpad($body: String!) {
+          commentUpdate(id: 42, input: {body: $body}) {
+            success
+          }
+        }
+        """,
+        "variables" => %{"body" => "## Codex Workpad\n\nnon-string id"}
+      },
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $content: String!) {
+          commentUpdate(id: $id, input: null) {
+            success
+          }
+        }
+        """,
+        "variables" => %{"id" => "workpad-1", "content" => "## Codex Workpad\n\nnull input"}
+      },
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $content: String!) {
+          commentUpdate(id: $id, input {body: $content}) {
+            success
+          }
+        }
+        """,
+        "variables" => %{"id" => "workpad-1", "content" => "## Codex Workpad\n\nmissing input colon"}
+      }
+    ]
+
+    for args <- args do
+      response =
+        DynamicTool.execute(
+          "linear_graphql",
+          args,
+          linear_client: fn query, variables, opts ->
+            send(test_pid, {:unguarded_malformed_update, query, variables, opts})
+            {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+          end
+        )
+
+      assert response["success"] == true
+    end
+
+    assert_received {:unguarded_malformed_update, _query, %{"body" => "## Codex Workpad\n\nmissing parens"}, []}
+    assert_received {:unguarded_malformed_update, _query, %{"body" => "## Codex Workpad\n\nmissing id colon"}, []}
+    assert_received {:unguarded_malformed_update, _query, %{"body" => "## Codex Workpad\n\nnon-string id"}, []}
+    assert_received {:unguarded_malformed_update, _query, %{"content" => "## Codex Workpad\n\nnull input"}, []}
+    assert_received {:unguarded_malformed_update, _query, %{"content" => "## Codex Workpad\n\nmissing input colon"}, []}
+  end
+
+  test "linear_graphql workpad updates ignore invalid id variable values" do
+    query = """
+    mutation UpdateWorkpad($commentId: WorkpadTargetInput!, $body: String!) {
+      commentUpdate(id: $commentId, input: {body: $body}) {
+        success
+      }
+    }
+    """
+
+    variables = %{"commentId" => [], "body" => "## Codex Workpad\n\ninvalid id variable"}
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => query, "variables" => variables},
+        linear_client: fn forwarded_query, forwarded_variables, opts ->
+          send(test_pid, {:invalid_id_update_pass_through, forwarded_query, forwarded_variables, opts})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:invalid_id_update_pass_through, forwarded_query, ^variables, []}
+    assert String.trim(forwarded_query) == String.trim(query)
+  end
+
+  test "linear_graphql workpad updates tolerate non-map active readbacks as malformed empty lists" do
+    target = %{
+      "body" => "## Codex Workpad\n\nactive malformed response",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "id" => "active-workpad",
+      "issueId" => "issue-workpad-race",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-08-07T12:02:00Z"
+    }
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nmalformed response update"),
+        linear_client: fn query, variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => target}}}
+
+            String.contains?(query, "comments") ->
+              {:ok, "malformed"}
+
+            String.contains?(query, "commentUpdate") ->
+              {:ok,
+               %{
+                 "data" => %{
+                   "commentUpdate" => %{
+                     "success" => true,
+                     "comment" => %{target | "body" => Map.fetch!(variables, "body")}
+                   }
+                 }
+               }}
+          end
+        end
+      )
+      |> output()
+
+    assert get_in(response, ["data", "commentUpdate", "comment", "body"]) ==
+             "## Codex Workpad\n\nmalformed response update"
+  end
+
+  test "linear_graphql ignores comment-only update decoys without trailing newlines" do
+    query = ~s|# commentUpdate(id: "workpad-1", input: {body: "## Codex Workpad"})|
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => query, "variables" => %{}},
+        linear_client: fn forwarded_query, variables, opts ->
+          send(test_pid, {:comment_only_update_pass_through, forwarded_query, variables, opts})
+          {:ok, %{"data" => %{}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:comment_only_update_pass_through, ^query, %{}, []}
+  end
+
+  test "linear_graphql workpad updates retarget literal ids after decoy update fields" do
+    table = :ets.new(:workpad_bootstrap_guard_update_literal_after_decoy, [:public])
+    test_pid = self()
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder decoy literal",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer decoy literal",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($content: String!) {
+          noArgs: commentUpdate {
+            success
+          }
+          decoy: commentUpdate(id: "unrelated-workpad", input: {body: "regular body"}) {
+            success
+          }
+          saved: commentUpdate(
+            note: wrapper(value: "ignored")
+            # literal id follows this comment
+            id: "older-workpad",
+            input: {body: $content}
+          ) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{"content" => "## Codex Workpad\n\ndecoy literal update"}
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          send(test_pid, {:decoy_literal_update_query, query})
+          record_workpad_call(table, :comment_update, variables)
+
+          comment =
+            table
+            |> lookup_workpad_comment("newer-workpad")
+            |> Map.put("body", Map.fetch!(variables, "content"))
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, "newer-workpad"}, comment})
+
+          {:ok, %{"data" => %{"saved" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert_received {:decoy_literal_update_query, query}
+    assert query =~ ~r/id:\s*"newer-workpad"/
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "newer-workpad"
+  end
+
+  test "linear_graphql workpad updates skip regular updates before workpad updates" do
+    table = :ets.new(:workpad_bootstrap_guard_update_after_regular_update, [:public])
+
+    insert_workpad_comment(table, "regular-comment", %{
+      "body" => "regular comment",
+      "createdAt" => "2026-08-07T12:01:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:01:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder compound update",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer compound update",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($regularId: String!, $regularBody: String!, $id: String!, $body: String!) {
+          regular: commentUpdate(id: $regularId, input: {body: $regularBody}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+          saved: commentUpdate(id: $id, input: {body: $body}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{
+          "regularId" => "regular-comment",
+          "regularBody" => "regular update",
+          "id" => "older-workpad",
+          "body" => "## Codex Workpad\n\ncompound update"
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+
+          id = Map.fetch!(variables, "id")
+          body = Map.fetch!(variables, "body")
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", body)
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok,
+           %{
+             "data" => %{
+               "regular" => %{"success" => true},
+               "saved" => %{"success" => true, "comment" => comment}
+             }
+           }}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "newer-workpad"
+    assert lookup_workpad_comment(table, "older-workpad")["body"] == "## Codex Workpad\n\nolder compound update"
+    assert lookup_workpad_comment(table, "newer-workpad")["body"] == "## Codex Workpad\n\ncompound update"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{
+               "regularId" => "regular-comment",
+               "regularBody" => "regular update",
+               "id" => "newer-workpad",
+               "body" => "## Codex Workpad\n\ncompound update"
+             }
+           ]
+  end
+
+  test "linear_graphql workpad creates use default response key when mutation names are ignored" do
+    table = :ets.new(:workpad_bootstrap_guard_ignored_create_name, [:public])
+
+    create =
+      %{
+        "query" => """
+        # commentCreate(input: {issueId: "ignored", body: "ignored"})
+        mutation CreateWorkpad($input: CommentCreateInput!) {
+          noop
+        }
+        """,
+        "variables" => %{
+          "input" => %{
+            "issueId" => "issue-workpad-race",
+            "body" => "## Codex Workpad\n\nignored name create"
+          }
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        cond do
+          String.contains?(query, "comments") ->
+            record_workpad_call(table, :comment_lookup, variables)
+            {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+
+          String.contains?(query, "commentCreate") ->
+            handle_workpad_create(table, variables)
+
+          true ->
+            workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(create, ["data", "commentCreate", "comment", "id"]) == "workpad-1"
+    assert active_workpad_ids(table) == ["workpad-1"]
+  end
+
+  test "linear_graphql workpad updates fail closed on malformed target lookup payloads" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nmalformed target lookup"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") -> {:ok, []}
+            String.contains?(query, "commentUpdate") -> flunk("update should not run after malformed target lookup")
+          end
+        end
+      )
+
+    assert response["success"] == false
+
+    assert get_in(Jason.decode!(response["output"]), ["error", "reason"]) ==
+             "{:workpad_update_target_not_found, \"active-workpad\"}"
+  end
+
+  test "linear_graphql aliased workpad updates ignore decoy mutation names in strings and comments" do
+    table = :ets.new(:workpad_bootstrap_guard_aliased_update_decoys, [:public])
+
+    insert_workpad_comment(table, "workpad-1", %{
+      "body" => "## Codex Workpad\n\ncanonical",
+      "createdAt" => "2026-08-07T12:05:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:05:00Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $body: String!) {
+          note(text: \"\"\"decoy: commentUpdate(id: $id, input: {body: $body})\"\"\")
+          # decoy: commentUpdate(id: $id, input: {body: $body}) {
+          saved: commentUpdate(id: $id, input: {body: $body}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{"id" => "workpad-1", "body" => "## Codex Workpad\n\nscanner update"}
+      }
+      |> execute_with_client(aliased_workpad_update_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "workpad-1"
+    assert get_in(update, ["data", "saved", "reusedExistingWorkpad"]) == false
+  end
+
+  test "linear_graphql aliased workpad updates use fallback comment when response omits comment" do
+    table = :ets.new(:workpad_bootstrap_guard_aliased_update_no_comment, [:public])
+
+    insert_workpad_comment(table, "workpad-1", %{
+      "body" => "## Codex Workpad\n\ncanonical",
+      "createdAt" => "2026-08-07T12:05:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:05:00Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "workpad-1"
+      |> aliased_workpad_update_args("## Codex Workpad\n\naliased update no comment")
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          with {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}} <-
+                 handle_workpad_update(table, variables) do
+            {:ok, %{"data" => %{"saved" => %{"success" => true}}}}
+          end
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "saved", "comment", "id"]) == "workpad-1"
+    assert get_in(update, ["data", "saved", "reusedExistingWorkpad"]) == false
+    assert lookup_workpad_comment(table, "workpad-1")["body"] == "## Codex Workpad\n\naliased update no comment"
+  end
+
+  test "linear_graphql workpad updates pass through non-workpad targets" do
+    table = :ets.new(:workpad_bootstrap_guard_update_non_workpad_target, [:public])
+
+    insert_workpad_comment(table, "regular-comment", %{
+      "body" => "regular comment",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "regular-comment"
+      |> workpad_update_args("## Codex Workpad\n\nnew workpad body")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "regular-comment"
+    assert count_workpad_calls(table, :comment_lookup) == 1
+    assert count_workpad_calls(table, :comment_update) == 1
+  end
+
+  test "linear_graphql workpad updates pass through malformed target lookups" do
+    table = :ets.new(:workpad_bootstrap_guard_update_malformed_target, [:public])
+
+    update =
+      "malformed-workpad"
+      |> workpad_update_args("## Codex Workpad\n\nmalformed target update")
+      |> execute_with_client(fn query, variables, opts ->
+        cond do
+          String.contains?(query, "comment(id:") ->
+            {:ok, %{"data" => %{"comment" => "malformed"}}}
+
+          String.contains?(query, "commentUpdate") ->
+            record_workpad_call(table, :comment_update, variables)
+
+            {:ok,
+             %{
+               "data" => %{
+                 "commentUpdate" => %{
+                   "success" => true,
+                   "comment" => %{"id" => "malformed-workpad", "body" => Map.fetch!(variables, "body")}
+                 }
+               }
+             }}
+
+          true ->
+            workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "malformed-workpad"
+    assert count_workpad_calls(table, :comment_update) == 1
+  end
+
+  test "linear_graphql comment updates without workpad bodies pass through unguarded" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("regular-comment", "regular update body"),
+        linear_client: fn query, variables, opts ->
+          send(test_pid, {:unguarded_update, query, variables, opts})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:unguarded_update, _query, %{"body" => "regular update body", "id" => "regular-comment"}, []}
+  end
+
+  test "linear_graphql workpad updates fail closed when the target cannot be verified" do
+    missing =
+      "missing-workpad"
+      |> workpad_update_args("## Codex Workpad\n\nmissing target")
+      |> execute_with_client(workpad_linear_client(:ets.new(:workpad_update_missing_target, [:public])))
+
+    assert missing["success"] == false
+
+    assert get_in(Jason.decode!(missing["output"]), ["error", "reason"]) ==
+             "{:workpad_update_target_not_found, \"missing-workpad\"}"
+
+    lookup_error =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("workpad-lookup-error", "## Codex Workpad\n\nlookup error"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") -> {:error, :comment_lookup_failed}
+            String.contains?(query, "commentUpdate") -> flunk("update should not run after target lookup failure")
+          end
+        end
+      )
+
+    assert lookup_error["success"] == false
+    assert get_in(Jason.decode!(lookup_error["output"]), ["error", "reason"]) == ":comment_lookup_failed"
+  end
+
+  test "linear_graphql workpad updates fail closed when active workpad readback has GraphQL errors" do
+    target = %{
+      "body" => "## Codex Workpad\n\nactive readback error",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "id" => "active-workpad",
+      "issueId" => "issue-workpad-race",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-08-07T12:02:00Z"
+    }
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nmust not update"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => target}}}
+
+            String.contains?(query, "comments") ->
+              {:ok, %{"errors" => [%{"message" => "list failed"}]}}
+
+            String.contains?(query, "commentUpdate") ->
+              flunk("update should not run after active workpad readback errors")
+          end
+        end
+      )
+
+    assert response["success"] == false
+    reason = get_in(Jason.decode!(response["output"]), ["error", "reason"])
+    assert reason =~ "linear_graphql_errors"
+    assert reason =~ "workpad_comments_lookup_failed"
+  end
+
+  test "linear_graphql workpad updates fail closed without an active target issue" do
+    missing_issue_table = :ets.new(:workpad_update_missing_issue_id, [:public])
+
+    insert_workpad_comment(missing_issue_table, "missing-issue-workpad", %{
+      "body" => "## Codex Workpad\n\nmissing issue id",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    missing_issue =
+      "missing-issue-workpad"
+      |> workpad_update_args("## Codex Workpad\n\nmissing issue update")
+      |> execute_with_client(workpad_linear_client(missing_issue_table))
+
+    assert missing_issue["success"] == false
+
+    assert get_in(Jason.decode!(missing_issue["output"]), ["error", "reason"]) ==
+             "{:workpad_update_missing_issue_id, \"missing-issue-workpad\"}"
+
+    resolved_table = :ets.new(:workpad_update_resolved_target, [:public])
+
+    insert_workpad_comment(resolved_table, "resolved-workpad", %{
+      "body" => "## Codex Workpad\n\nresolved target",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => "2026-08-07T12:03:00Z"
+    })
+
+    resolved =
+      "resolved-workpad"
+      |> workpad_update_args("## Codex Workpad\n\nresolved update")
+      |> execute_with_client(workpad_linear_client(resolved_table))
+
+    assert resolved["success"] == false
+
+    assert get_in(Jason.decode!(resolved["output"]), ["error", "reason"]) ==
+             "{:workpad_update_target_not_active, \"resolved-workpad\"}"
+  end
+
+  test "linear_graphql workpad updates preserve unsuccessful update responses" do
+    target = %{
+      "body" => "## Codex Workpad\n\nactive",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "id" => "active-workpad",
+      "issueId" => "issue-workpad-race",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-08-07T12:02:00Z"
+    }
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nunsuccessful update"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => target}}}
+
+            String.contains?(query, "comments") ->
+              {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => [target]}}}}}
+
+            String.contains?(query, "commentUpdate") ->
+              {:ok, %{"data" => %{"commentUpdate" => %{"success" => false}}}}
+          end
+        end
+      )
+
+    assert response["success"] == true
+    assert get_in(Jason.decode!(response["output"]), ["data", "commentUpdate", "success"]) == false
+  end
+
+  test "linear_graphql workpad updates detect nested input variables" do
+    table = :ets.new(:workpad_update_nested_input, [:public])
+
+    insert_workpad_comment(table, "workpad-1", %{
+      "body" => "## Codex Workpad\n\nnested input",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      "workpad-1"
+      |> nested_input_workpad_update_args("## Codex Workpad\n\nnested input update")
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "workpad-1"
+    assert lookup_workpad_comment(table, "workpad-1")["body"] == "## Codex Workpad\n\nnested input update"
+  end
+
+  test "linear_graphql workpad updates keep searching nested body after wrapper body" do
+    table = :ets.new(:workpad_update_nested_body_after_wrapper_body, [:public])
+
+    insert_workpad_comment(table, "workpad-1", %{
+      "body" => "## Codex Workpad\n\nnested wrapper body",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    update_body = "## Codex Workpad\n\nnested wrapper body update"
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWrappedWorkpad($id: String!, $input: CommentUpdateInput!) {
+          commentUpdate(id: $id, input: $input) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{
+          "id" => "workpad-1",
+          "body" => "wrapper metadata",
+          "input" => %{"body" => update_body}
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+
+          comment =
+            table
+            |> lookup_workpad_comment(Map.fetch!(variables, "id"))
+            |> Map.put("body", get_in(variables, ["input", "body"]))
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, Map.fetch!(variables, "id")}, comment})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "workpad-1"
+    assert lookup_workpad_comment(table, "workpad-1")["body"] == update_body
+    assert count_workpad_calls(table, :comment_lookup) == 2
+    assert count_workpad_calls(table, :comment_update) == 1
+  end
+
+  test "linear_graphql workpad creates preserve success responses without comments" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_create_args("## Codex Workpad\n\nsuccess without comment"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comments") ->
+              {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+
+            String.contains?(query, "commentCreate") ->
+              {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+          end
+        end
+      )
+
+    assert response["success"] == true
+    assert get_in(Jason.decode!(response["output"]), ["data", "commentCreate", "success"]) == true
+  end
+
+  test "linear_graphql workpad updates attach fallback comments when Linear omits them" do
+    target = %{
+      "body" => "## Codex Workpad\n\nactive fallback",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "id" => "active-workpad",
+      "issueId" => "issue-workpad-race",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-08-07T12:02:00Z"
+    }
+
+    update =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nfallback update"),
+        linear_client: fn query, _variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => target}}}
+
+            String.contains?(query, "comments") ->
+              {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => [target]}}}}}
+
+            String.contains?(query, "commentUpdate") ->
+              {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+          end
+        end
+      )
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "active-workpad"
+    assert get_in(update, ["data", "commentUpdate", "resolvedDuplicateIds"]) == []
+  end
+
+  test "linear_graphql comment updates ignore non-workpad bodies" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("comment-1", "regular body"),
+        linear_client: fn query, variables, opts ->
+          send(test_pid, {:pass_through_update, query, variables, opts})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:pass_through_update, _query, %{"body" => "regular body", "id" => "comment-1"}, []}
+  end
+
+  test "linear_graphql workpad updates pass through malformed target comments" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("malformed-target", "## Codex Workpad\n\nmalformed target"),
+        linear_client: fn query, variables, opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => "malformed"}}}
+
+            String.contains?(query, "commentUpdate") ->
+              send(test_pid, {:malformed_target_update, variables, opts})
+              {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+          end
+        end
+      )
+
+    assert response["success"] == true
+    assert_received {:malformed_target_update, %{"body" => "## Codex Workpad\n\nmalformed target"}, []}
+  end
+
+  test "linear_graphql workpad updates treat malformed active lookups as empty" do
+    target = %{
+      "body" => "## Codex Workpad\n\nactive malformed lookup",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "id" => "active-workpad",
+      "issueId" => "issue-workpad-race",
+      "resolvedAt" => nil,
+      "updatedAt" => "2026-08-07T12:02:00Z"
+    }
+
+    update =
+      DynamicTool.execute(
+        "linear_graphql",
+        workpad_update_args("active-workpad", "## Codex Workpad\n\nmalformed lookup update"),
+        linear_client: fn query, variables, _opts ->
+          cond do
+            String.contains?(query, "comment(id:") ->
+              {:ok, %{"data" => %{"comment" => target}}}
+
+            String.contains?(query, "comments") ->
+              {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => nil}}}}}
+
+            String.contains?(query, "commentUpdate") ->
+              {:ok,
+               %{
+                 "data" => %{
+                   "commentUpdate" => %{
+                     "success" => true,
+                     "comment" => %{
+                       target
+                       | "body" => Map.fetch!(variables, "body"),
+                         "updatedAt" => "2026-08-07T12:03:00Z"
+                     }
+                   }
+                 }
+               }}
+          end
+        end
+      )
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "body"]) ==
+             "## Codex Workpad\n\nmalformed lookup update"
+  end
+
+  test "linear_graphql workpad updates detect nested id variables" do
+    table = :ets.new(:workpad_update_nested_id, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder nested id",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer nested id",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($target: WorkpadTargetInput!, $body: String!) {
+          commentUpdate(id: $target, input: {body: $body}) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{"target" => %{"id" => "older-workpad"}, "body" => "## Codex Workpad\n\nnested id update"}
+      }
+      |> execute_with_client(workpad_linear_client(table))
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+
+    assert workpad_call_variables(table, :comment_update) == [
+             %{"target" => %{"id" => "newer-workpad"}, "body" => "## Codex Workpad\n\nnested id update"}
+           ]
+  end
+
+  test "linear_graphql workpad updates find nested workpad body when outer body is not a workpad" do
+    table = :ets.new(:workpad_update_nested_body_with_outer_body, [:public])
+
+    insert_workpad_comment(table, "older-workpad", %{
+      "body" => "## Codex Workpad\n\nolder nested body",
+      "createdAt" => "2026-08-07T12:02:00Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:00Z",
+      "resolvedAt" => nil
+    })
+
+    insert_workpad_comment(table, "newer-workpad", %{
+      "body" => "## Codex Workpad\n\nnewer nested body",
+      "createdAt" => "2026-08-07T12:02:10Z",
+      "issueId" => "issue-workpad-race",
+      "updatedAt" => "2026-08-07T12:02:10Z",
+      "resolvedAt" => nil
+    })
+
+    update =
+      %{
+        "query" => """
+        mutation UpdateWorkpad($id: String!, $body: String!, $input: CommentUpdateInput!) {
+          commentUpdate(id: $id, input: $input) {
+            success
+            comment {
+              id
+              body
+            }
+          }
+        }
+        """,
+        "variables" => %{
+          "id" => "older-workpad",
+          "body" => "ordinary comment",
+          "input" => %{"body" => "## Codex Workpad\n\nnested body update"}
+        }
+      }
+      |> execute_with_client(fn query, variables, opts ->
+        if String.contains?(query, "commentUpdate") do
+          record_workpad_call(table, :comment_update, variables)
+          id = map_get_input(variables, "id")
+          body = get_in(variables, ["input", "body"])
+
+          comment =
+            table
+            |> lookup_workpad_comment(id)
+            |> Map.put("body", body)
+            |> Map.put("updatedAt", timestamp(99))
+
+          :ets.insert(table, {{:comment, id}, comment})
+
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => comment}}}}
+        else
+          workpad_linear_client(table).(query, variables, opts)
+        end
+      end)
+      |> output()
+
+    assert get_in(update, ["data", "commentUpdate", "comment", "id"]) == "newer-workpad"
+    assert get_in(update, ["data", "commentUpdate", "comment", "body"]) == "## Codex Workpad\n\nnested body update"
     assert active_workpad_ids(table) == ["newer-workpad"]
   end
 
@@ -1457,6 +2946,22 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert non_binary_body["success"] == true
     assert_received {:unguarded_create, _query, %{"body" => 42, "issueId" => "issue-workpad-race"}, []}
+
+    missing_input =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation CreateWorkpad { commentCreate(body: \"## Codex Workpad\\n\\nmissing input\") { success } }",
+          "variables" => %{}
+        },
+        linear_client: fn query, variables, opts ->
+          send(test_pid, {:unguarded_create, query, variables, opts})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+        end
+      )
+
+    assert missing_input["success"] == true
+    assert_received {:unguarded_create, _query, %{}, []}
   end
 
   test "linear_graphql workpad create fails closed when active lookup fails before create" do
@@ -1791,6 +3296,81 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
+  defp aliased_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($input: CommentCreateInput!) {
+        bootstrap: commentCreate(input: $input) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{"input" => %{"issueId" => issue_id, "body" => body}}
+    }
+  end
+
+  defp compound_aliased_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($input: CommentCreateInput!) {
+        decoy: commentCreate(input: {issueId: "issue-other", body: "regular comment"}) {
+          success
+          comment {
+            id
+          }
+        }
+        bootstrap: commentCreate(input: $input) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{"input" => %{"issueId" => issue_id, "body" => body}}
+    }
+  end
+
+  defp compound_variable_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
+    %{
+      "query" => """
+      mutation CreateWorkpad($regularInput: CommentCreateInput!, $workpadInput: CommentCreateInput!) {
+        decoy: commentCreate(input: $regularInput) {
+          success
+          comment {
+            id
+          }
+        }
+        bootstrap: commentCreate(input: $workpadInput) {
+          success
+          comment {
+            id
+            body
+            resolvedAt
+            createdAt
+            updatedAt
+          }
+        }
+      }
+      """,
+      "variables" => %{
+        "regularInput" => %{"issueId" => "issue-other", "body" => "regular comment"},
+        "workpadInput" => %{"issueId" => issue_id, "body" => body}
+      }
+    }
+  end
+
   defp inline_workpad_create_args(body, issue_id \\ "issue-workpad-race") do
     %{
       "query" => """
@@ -1985,6 +3565,40 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     }
   end
 
+  defp aliased_workpad_update_args(id, body) do
+    %{
+      "query" => """
+      mutation UpdateWorkpad($id: String!, $body: String!) {
+        saved: commentUpdate(id: $id, input: {body: $body}) {
+          success
+          comment {
+            id
+            body
+          }
+        }
+      }
+      """,
+      "variables" => %{"id" => id, "body" => body}
+    }
+  end
+
+  defp nested_input_workpad_update_args(id, body) do
+    %{
+      "query" => """
+      mutation UpdateWorkpad($id: String!, $input: CommentUpdateInput!) {
+        commentUpdate(id: $id, input: $input) {
+          success
+          comment {
+            id
+            body
+          }
+        }
+      }
+      """,
+      "variables" => %{"id" => id, "input" => %{"body" => body}}
+    }
+  end
+
   defp workpad_linear_client(table) do
     fn query, variables, _opts ->
       cond do
@@ -2006,6 +3620,16 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
         true ->
           {:ok, %{"data" => %{}}}
+      end
+    end
+  end
+
+  defp aliased_workpad_update_linear_client(table) do
+    fn query, variables, opts ->
+      if String.contains?(query, "commentUpdate") do
+        handle_aliased_workpad_update(table, variables)
+      else
+        workpad_linear_client(table).(query, variables, opts)
       end
     end
   end
@@ -2098,6 +3722,42 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     end
   end
 
+  defp stale_aliased_create_workpad_linear_client(table) do
+    fn query, variables, opts ->
+      cond do
+        String.contains?(query, "commentCreate") ->
+          handle_aliased_workpad_create(table, variables)
+
+        String.contains?(query, "comments") ->
+          record_workpad_call(table, :comment_lookup, variables)
+          {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+
+        true ->
+          workpad_linear_client(table).(query, variables, opts)
+      end
+    end
+  end
+
+  defp handle_aliased_workpad_create(table, variables) do
+    case handle_workpad_create(table, variables) do
+      {:ok, %{"data" => %{"commentCreate" => comment_create}}} ->
+        {:ok, %{"data" => %{"bootstrap" => comment_create}}}
+
+      other ->
+        other
+    end
+  end
+
+  defp handle_aliased_workpad_update(table, variables) do
+    case handle_workpad_update(table, variables) do
+      {:ok, %{"data" => %{"commentUpdate" => comment_update}}} ->
+        {:ok, %{"data" => %{"saved" => comment_update}}}
+
+      other ->
+        other
+    end
+  end
+
   defp delayed_visibility_workpad_response(table, query, variables, opts) do
     cond do
       String.contains?(query, "commentCreate") -> handle_delayed_visibility_workpad_create(table, variables)
@@ -2127,6 +3787,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     comment = %{
       "id" => id,
       "body" => map_get_input(variables, "body"),
+      "issueId" => map_get_input(variables, "issueId"),
       "createdAt" => timestamp(sequence),
       "updatedAt" => timestamp(sequence),
       "resolvedAt" => nil,
